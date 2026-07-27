@@ -75,7 +75,7 @@ Numpad            Compass walking: 8 2 4 6 and corners, 5 or 0 look,
 
 Speech:
 Ctrl+M            Self-voice on or off
-Ctrl+F            Follow mode: speech interrupts when you change rooms
+Ctrl+Shift+F      Follow mode: speech interrupts when you change rooms
 Ctrl+I            Interrupt mode: every line barges in
 Esc or F11        Stop speech now
 Shift+F11         Stop all sounds (panic)
@@ -88,6 +88,11 @@ Alt+Shift+Left / Right   Review character by character
 Alt+Home / End    Oldest / newest line
 Alt+Shift+Enter   Spell the current line character by character
 Alt+T             Repeat the last tell
+
+Finding text (Tab to the output first; these do nothing in the command box):
+Ctrl+F            Find in the output: what to look for, up or down, match case
+F3                Find the next match, same settings
+Shift+F3          Find the previous match
 Alt+C             Repeat the last chat line
 
 Chat channels:

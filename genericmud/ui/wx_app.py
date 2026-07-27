@@ -77,7 +77,7 @@ from genericmud.session.diaglog import DiagnosticLog, make_diagnostic_log
 from genericmud.session.hub import SessionHub
 from genericmud.sound.pygame_backend import make_pygame_backend
 from genericmud.transport.connection import MudConnection
-from genericmud.ui.scrollback import anchor_after_append
+from genericmud.ui.scrollback import FindState, anchor_after_append, find_offset
 from genericmud.update import self_update
 from genericmud.voice.factory import make_voice_backend
 from genericmud.voice.router import VoiceRouter
@@ -204,6 +204,9 @@ class SessionPanel(wx.Panel):
         self._completion = CompletionCycler()
         self._completion_start = 0  # where the word being completed begins in the input
         self._completion_tail = ""  # text after the caret when the completion run began
+        self._find = FindState()  # sticky across searches; F3 repeats whatever is in here
+        self._find_direction = False  # direction of the search in flight, for the caret sync
+        self._keep_caret_on_focus = False  # one-shot: don't jump to the bottom this time
 
         # NVDA reads a control's name from a wx.StaticText created immediately
         # before it plus SetName() (the proven ffn-dl pattern). Both are required.
@@ -225,6 +228,7 @@ class SessionPanel(wx.Panel):
         self.input.Bind(wx.EVT_KEY_DOWN, self._on_input_key)
         self.output.Bind(wx.EVT_CHAR, self._on_output_char)
         self.output.Bind(wx.EVT_SET_FOCUS, self._on_output_focus)
+        self.output.Bind(wx.EVT_KEY_DOWN, self._on_output_key)
 
         asyncio.run_coroutine_threadsafe(self._start(), loop)
 
@@ -332,6 +336,8 @@ class SessionPanel(wx.Panel):
             if not self._flush_scheduled:
                 self._flush_scheduled = True
                 wx.CallLater(_FLUSH_INTERVAL_MS, self._flush_output)
+        elif kind == protocol.FIND_RESULT:
+            self._sync_find_caret(message)
         # Sound/status messages are ignored here for now (native SFX is a follow-up).
 
     def _flush_output(self) -> None:
@@ -373,9 +379,91 @@ class SessionPanel(wx.Panel):
         deliberately does not. Done synchronously rather than via CallAfter so the caret
         is already at the end when the screen reader reads the newly focused control.
         """
-        self.output.SetInsertionPointEnd()
-        self.output.ShowPosition(self.output.GetLastPosition())
+        if self._keep_caret_on_focus:
+            # Focus is coming back from the Find dialog, so the search must run from where
+            # the reader actually was. Jumping to the bottom here would throw that away.
+            self._keep_caret_on_focus = False
+        else:
+            self.output.SetInsertionPointEnd()
+            self.output.ShowPosition(self.output.GetLastPosition())
         event.Skip()
+
+    # --- find (output only) ---
+
+    def _on_output_key(self, event: wx.KeyEvent) -> None:
+        """Find keys, live only while the output has focus: Ctrl+F, F3, Shift+F3.
+
+        Bound on the control rather than routed through the keymap on purpose -- the
+        keymap fires wherever focus is, and Find is meaningless from the command box.
+        """
+        code = event.GetKeyCode()
+        if code == ord("F") and event.ControlDown() and not event.AltDown():
+            self._open_find()
+            return
+        if code == wx.WXK_F3:
+            self._find_again(reverse=event.ShiftDown())
+            return
+        event.Skip()
+
+    def _open_find(self) -> None:
+        # Armed for the whole dialog round trip, not after it: closing the dialog hands
+        # focus back to the output during ShowModal/Destroy, and that arrival must not
+        # throw the caret to the bottom -- the search runs from wherever the reader was.
+        # Cleared in a finally so a cancelled search can't leave it armed and eat the
+        # jump-to-bottom on the next genuine tab-in.
+        self._keep_caret_on_focus = True
+        try:
+            dialog = FindDialog(self, self._find)
+            try:
+                state = dialog.state() if dialog.ShowModal() == wx.ID_OK else None
+            finally:
+                dialog.Destroy()
+            if state is None or not state.term:
+                return
+            self._find = state
+            self.output.SetFocus()  # the search runs from the caret, so go back to it first
+        finally:
+            self._keep_caret_on_focus = False
+        self._run_find(self._find.forward)
+
+    def _find_again(self, *, reverse: bool) -> None:
+        """F3 repeats the last search; Shift+F3 repeats it the other way for one hop."""
+        if not self._find.term:
+            self._open_find()
+            return
+        self._run_find(not self._find.forward if reverse else self._find.forward)
+
+    def _run_find(self, forward: bool) -> None:
+        if self.app is None:
+            return
+        self._find_direction = forward  # _sync_find_caret needs the direction actually used
+        self._loop.call_soon_threadsafe(
+            self.app.on_ws_message,
+            protocol.find(
+                self._find.term, forward=forward, case_sensitive=self._find.case_sensitive
+            ),
+        )
+
+    def _sync_find_caret(self, message: dict) -> None:
+        """Put the output caret on the line the engine's scrollback search matched.
+
+        The engine searches the whole buffer; this control only holds the last
+        _OUTPUT_CAP_LINES. A match older than that leaves the caret alone and the spoken
+        line is all the reader gets, which beats moving them somewhere wrong.
+        """
+        if not message.get("found"):
+            return
+        offset = find_offset(
+            self.output.GetValue(),
+            message.get("text", ""),
+            self.output.GetInsertionPoint(),
+            forward=self._find_direction,
+            case_sensitive=True,  # matching the engine's own line text back, verbatim
+        )
+        if offset is None:
+            return
+        self.output.SetInsertionPoint(offset)
+        self.output.ShowPosition(offset)
 
     def _on_send(self, _event: wx.CommandEvent) -> None:
         text = self.input.GetValue()
@@ -532,6 +620,53 @@ class SessionPanel(wx.Panel):
             # A deliberate close is silent (no "disconnected" status fires), so the
             # status-side flush never runs; cut the pack's looping cues here.
             self.app.sound.flush()
+
+
+class FindDialog(wx.Dialog):
+    """Search the output: what to find, which way, and whether case matters.
+
+    Opens holding the previous search, so reopening and pressing Enter repeats it. Every
+    label is a StaticText placed immediately before its control and the text field is
+    named as well, which is the pattern NVDA reads reliably here.
+    """
+
+    def __init__(self, parent: wx.Window, state: FindState) -> None:
+        super().__init__(parent, title="Find in output")
+        outer = wx.BoxSizer(wx.VERTICAL)
+
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(wx.StaticText(self, label="Find &what:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self._term = wx.TextCtrl(self, value=state.term)
+        self._term.SetName("Find what")
+        row.Add(self._term, 1, wx.EXPAND)
+        outer.Add(row, 0, wx.ALL | wx.EXPAND, 10)
+
+        # Order must mirror the boolean: index 0 = backwards, index 1 = forwards.
+        self._direction = wx.RadioBox(
+            self,
+            label="&Direction",
+            choices=["Up, towards older lines", "Down, towards newer lines"],
+            majorDimension=1,
+            style=wx.RA_SPECIFY_COLS,
+        )
+        self._direction.SetSelection(1 if state.forward else 0)
+        outer.Add(self._direction, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
+
+        self._case = wx.CheckBox(self, label="Match &case")
+        self._case.SetValue(state.case_sensitive)
+        outer.Add(self._case, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+        outer.Add(self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALL | wx.EXPAND, 10)
+        self.SetSizerAndFit(outer)
+        self._term.SetFocus()
+        self._term.SelectAll()  # typing replaces the old term; Enter alone repeats it
+
+    def state(self) -> FindState:
+        return FindState(
+            term=self._term.GetValue(),
+            forward=self._direction.GetSelection() == 1,
+            case_sensitive=self._case.GetValue(),
+        )
 
 
 class ConnectDialog(wx.Dialog):

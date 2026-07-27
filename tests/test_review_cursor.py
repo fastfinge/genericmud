@@ -62,6 +62,38 @@ def test_search_backward_from_bottom():
     assert cursor.search("dragon") == "beta dragon"
 
 
+def test_search_forward_from_the_top():
+    cursor = ReviewCursor(_buffer("alpha dragon", "beta", "gamma dragon"))
+    cursor.top()
+    assert cursor.search("dragon", forward=True) == "gamma dragon"
+
+
+def test_repeating_a_search_walks_past_the_current_line():
+    cursor = ReviewCursor(_buffer("one dragon", "two dragon", "three dragon"))
+    cursor.enter()  # at "three dragon"
+    assert cursor.search("dragon") == "two dragon"
+    assert cursor.search("dragon") == "one dragon"
+    assert cursor.search("dragon") == ""  # no wrap: running off the end is a miss
+
+
+def test_search_is_case_insensitive_by_default():
+    cursor = ReviewCursor(_buffer("alpha", "beta Dragon", "gamma"))
+    cursor.enter()
+    assert cursor.search("dragon") == "beta Dragon"
+
+
+def test_case_sensitive_search_skips_the_wrong_case():
+    cursor = ReviewCursor(_buffer("alpha dragon", "beta Dragon", "gamma"))
+    cursor.enter()
+    assert cursor.search("dragon", case_sensitive=True) == "alpha dragon"
+
+
+def test_case_sensitive_search_can_miss_entirely():
+    cursor = ReviewCursor(_buffer("alpha", "beta Dragon", "gamma"))
+    cursor.enter()
+    assert cursor.search("dragon", case_sensitive=True) == ""
+
+
 def test_copy_word_returns_current():
     cursor = ReviewCursor(_buffer("take the sword"))
     cursor.enter()

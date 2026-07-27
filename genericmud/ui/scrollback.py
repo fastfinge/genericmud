@@ -1,13 +1,19 @@
-"""Keeping a reader's place in the output control while new MUD text arrives.
+"""Reading position in the output control: keeping a place, and finding a new one.
+
+Two jobs, both pure so they can be tested on a machine that can't run the Windows UI.
 
 The output control is append-only and trimmed from the top, and both operations move
 text out from under someone who has tabbed in and is arrowing back through it: wx's
 ``AppendText`` drags the caret to the end, and dropping the oldest lines shifts every
-surviving offset down. This module holds that offset arithmetic, kept free of wx so it
-can be tested on a machine that can't run the Windows UI.
+surviving offset down. :func:`anchor_after_append` is that offset arithmetic.
+
+:func:`find_offset` backs the Find keys, locating a match in the control's text so the
+caret can follow the engine's scrollback search onto the same line.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 
 def anchor_after_append(anchor: int, removed: int, last_position: int) -> int:
@@ -19,3 +25,34 @@ def anchor_after_append(anchor: int, removed: int, last_position: int) -> int:
     rather than at a stale offset.
     """
     return max(0, min(anchor - removed, last_position))
+
+
+def find_offset(
+    text: str, needle: str, start: int, *, forward: bool, case_sensitive: bool
+) -> int | None:
+    """Offset of the next (or previous) ``needle`` in ``text``, or None for no match.
+
+    ``start`` is the caret. The search begins strictly past it in whichever direction is
+    asked for, so repeating a find walks through the matches rather than sticking on the
+    one already under the caret. Does not wrap, matching the scrollback search.
+    """
+    if not needle:
+        return None
+    haystack = text if case_sensitive else text.lower()
+    target = needle if case_sensitive else needle.lower()
+    caret = max(0, start)
+    found = haystack.find(target, caret + 1) if forward else haystack.rfind(target, 0, caret)
+    return None if found < 0 else found
+
+
+@dataclass
+class FindState:
+    """The last search, so the dialog reopens with it and F3 can repeat it.
+
+    Backwards by default: the output is history, and the interesting thing is nearly
+    always behind you.
+    """
+
+    term: str = ""
+    forward: bool = False
+    case_sensitive: bool = False

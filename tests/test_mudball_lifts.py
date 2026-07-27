@@ -29,7 +29,7 @@ def _key(app: EngineApp, combo: str) -> None:
 
 def test_follow_mode_interrupts_on_a_direction_but_not_on_ordinary_lines():
     app, backend, sent = _app()
-    _key(app, "ctrl+f")  # announced toggle
+    _key(app, "ctrl+shift+f")  # announced toggle
     assert any("follow mode on" in text for text in backend.spoken)
     stops = backend.stops
 
@@ -118,10 +118,10 @@ def test_keymap_toggles_report_to_the_pref_sink():
     app, _backend, _sent = _app()
     recorded: list[tuple[str, bool]] = []
     app.pref_sink = lambda attr, value: recorded.append((attr, value))
-    _key(app, "ctrl+f")
+    _key(app, "ctrl+shift+f")
     _key(app, "ctrl+i")
     _key(app, "ctrl+enter")
-    _key(app, "ctrl+f")
+    _key(app, "ctrl+shift+f")
     assert recorded == [
         ("follow_mode", True), ("interrupt_mode", True),
         ("autoretype", True), ("follow_mode", False),

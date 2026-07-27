@@ -687,6 +687,26 @@ class EngineApp:
             self._handle_key(message.get("key", ""))
         elif kind == protocol.CLIENT_ERROR:
             self._handle_client_error(message)
+        elif kind == protocol.FIND:
+            self._handle_find(message)
+
+    def _handle_find(self, message: dict) -> None:
+        """Search the scrollback and park the review cursor on the hit.
+
+        The engine owns the search because the buffer is the deep copy: it holds far more
+        history than the renderer's control does. The matched text goes back as a
+        FIND_RESULT so the renderer can put its own caret on the same line where it can.
+        """
+        term = message.get("term", "")
+        if not self.review.active:
+            self.review.enter()  # a fresh search starts from the newest line
+        hit = self.review.search(
+            term,
+            forward=bool(message.get("forward", False)),
+            case_sensitive=bool(message.get("case_sensitive", False)),
+        )
+        self._post(protocol.find_result(hit, found=bool(hit)))
+        self._speak_review(hit or f"not found: {term}")
 
     def _handle_client_error(self, message: dict) -> None:
         """A renderer-side failure (e.g. Web Audio couldn't load/decode a sound)."""

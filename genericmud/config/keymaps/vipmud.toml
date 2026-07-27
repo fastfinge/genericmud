@@ -32,7 +32,7 @@
 # Follow mode: speech interrupts when YOU move rooms, not on every line.
 # Interrupt mode: every incoming line barges in instead of queueing.
 # Autoretype: Enter on an empty input resends your last command.
-"ctrl+f" = "voice:follow_mode"
+"ctrl+shift+f" = "voice:follow_mode"  # Ctrl+F belongs to Find, in the output control
 "ctrl+i" = "voice:interrupt_mode"
 "ctrl+enter" = "input:autoretype"
 
@@ -78,3 +78,7 @@
 # Diagnostics: speak the sound-path trace file location + a one-line summary (backend,
 # packs/triggers loaded, cues attempted). The file always records; this just reads it out.
 "alt+shift+d" = "diag:where"
+
+# Not listed here, and not rebindable yet: Ctrl+F (find), F3 (find next) and Shift+F3
+# (find previous) are bound directly to the output control, because a keymap entry fires
+# wherever focus happens to be and Find is meaningless from the command box.

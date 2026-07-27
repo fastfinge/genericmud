@@ -20,6 +20,7 @@ ECHO = "echo"
 REVIEW = "review"
 CONNECTED = "connected"
 DISCONNECTED = "disconnected"
+FIND_RESULT = "find_result"  # outcome of a FIND, so the renderer can follow with its caret
 
 # Renderer -> engine
 INPUT = "input"
@@ -27,6 +28,7 @@ KEY = "key"
 CONNECT = "connect"
 DISCONNECT = "disconnect"
 CLIENT_ERROR = "client_error"  # renderer reporting a failure (e.g. Web Audio load/decode)
+FIND = "find"  # search the scrollback buffer; the engine owns the search, the renderer follows
 
 
 def line(
@@ -65,6 +67,16 @@ def echo(text: str, channel: str = "main") -> dict[str, Any]:
 
 def review(text: str) -> dict[str, Any]:
     return {"type": REVIEW, "text": text}
+
+
+def find(term: str, *, forward: bool = False, case_sensitive: bool = False) -> dict[str, Any]:
+    """Ask the engine to search the scrollback. Backwards by default: it is history."""
+    return {"type": FIND, "term": term, "forward": forward, "case_sensitive": case_sensitive}
+
+
+def find_result(text: str, *, found: bool) -> dict[str, Any]:
+    """The matched line, so the renderer can put its own caret on the same text."""
+    return {"type": FIND_RESULT, "text": text, "found": found}
 
 
 def connected(world: str) -> dict[str, Any]:

@@ -100,14 +100,21 @@ class ReviewCursor:
             return ""
         return lines[index].plain_text
 
-    def search(self, term: str, *, forward: bool = False) -> str:
+    def search(self, term: str, *, forward: bool = False, case_sensitive: bool = False) -> str:
+        """Move to the next line containing ``term`` and return it, or "" if there is none.
+
+        Searches from the line the cursor is on, exclusive, so repeating a search walks
+        through the matches instead of sticking on the current one. Does not wrap: running
+        off either end of the buffer is a miss, which the caller reports as such.
+        """
         count = len(self._buffer)
         if count == 0 or not term:
             return ""
         indices = range(self._line + 1, count) if forward else range(self._line - 1, -1, -1)
-        needle = term.lower()
+        needle = term if case_sensitive else term.lower()
         for i in indices:
-            if needle in self._buffer[i].plain_text.lower():
+            haystack = self._buffer[i].plain_text
+            if needle in (haystack if case_sensitive else haystack.lower()):
                 self._line = i
                 self._word = self._char = 0
                 return self._line_text()
