@@ -421,7 +421,8 @@ class SessionPanel(wx.Panel):
         prefix_text = self.input.GetValue()[: self._completion_start]
         self.input.SetValue(prefix_text + word + self._completion_tail)
         self.input.SetInsertionPoint(self._completion_start + len(word))
-        # SetValue is silent to NVDA (same as history recall); speak the chosen word.
+        # Tab is not a caret-movement gesture, so the screen reader announces nothing here
+        # (unlike history recall, where it reads the line itself) -- speak the word ourselves.
         self._loop.call_soon_threadsafe(self._speak_system, word)
 
     def _on_output_char(self, event: wx.KeyEvent) -> None:
@@ -440,9 +441,10 @@ class SessionPanel(wx.Panel):
         value = self._history[self._hist_index] if self._hist_index < len(self._history) else ""
         self.input.SetValue(value)
         self.input.SetInsertionPointEnd()
-        # NVDA doesn't announce a programmatic SetValue, so speak the recalled command.
-        if value:
-            self._loop.call_soon_threadsafe(self._speak_system, value)
+        # Deliberately silent -- do not add a self-voice call back here. Up/Down are
+        # caret-movement gestures, so NVDA runs its own move-by-line script and reads the
+        # field regardless of this handler consuming the key. Speaking as well raced that
+        # read: the user heard NVDA's "blank" and then our text on every recall.
 
     def _speak_system(self, text: str) -> None:  # loop thread
         if self._voice is not None:

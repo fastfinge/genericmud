@@ -1,10 +1,14 @@
 """VoiceRouter: per-channel self-voice with interruption and a fast-output governor.
 
-Live MUD lines flow through the governor on the ``main`` channel: a spam burst
-self-voices up to the rate budget, then coalesces the rest into an "N more lines"
-summary, while the full text always stays in the buffer for review. Other channels
-(tells, combat, system) are ungoverned. Passthrough mode mutes the router so the
-renderer's ARIA live region speaks instead.
+Live MUD lines flow through the governor on the ``main`` channel. Burst capacity and
+sustained rate are deliberately separate numbers: MUD output arrives in whole TCP
+packets, so a room description, a ``who`` list or a help page all land inside the same
+millisecond with no elapsed time to refill against. Sizing the burst to the rate made
+every one of those trip the governor. The burst therefore absorbs a screenful outright
+and only genuinely sustained spam coalesces, into an "N more lines" summary; the full
+text always stays in the buffer for review either way. Other channels (tells, combat,
+system) are ungoverned. Passthrough mode mutes the router so the renderer's ARIA live
+region speaks instead.
 """
 
 from __future__ import annotations
@@ -15,8 +19,14 @@ from collections.abc import Callable
 from genericmud.voice.backends.base import VoiceBackend
 from genericmud.voice.governor import TokenBucket
 
-DEFAULT_RATE = 20  # max self-voiced lines/sec on the governed channel before coalescing
+DEFAULT_RATE = 20  # sustained self-voiced lines/sec on the governed channel
+DEFAULT_BURST = 200  # lines absorbed from a single arrival: a couple of screenfuls
 MAIN_CHANNEL = "main"
+
+
+def _backlog_notice(count: int) -> str:
+    """Phrase the coalesced-line summary so it reads as speech, not as a counter."""
+    return "1 more line" if count == 1 else f"{count} more lines"
 
 
 class VoiceRouter:
@@ -25,11 +35,12 @@ class VoiceRouter:
         backend: VoiceBackend,
         *,
         rate: float = DEFAULT_RATE,
+        burst: float = DEFAULT_BURST,
         governed_channel: str = MAIN_CHANNEL,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._backend = backend
-        self._bucket = TokenBucket(rate, rate, clock)
+        self._bucket = TokenBucket(burst, rate, clock)
         self._governed = governed_channel
         self._suppressed = 0
         self._muted = False
@@ -43,7 +54,7 @@ class VoiceRouter:
         if interrupt:
             self._safe(self._backend.stop)  # barge in BEFORE the summary so it isn't truncated
         if channel == self._governed and self._suppressed:
-            self._safe(self._backend.speak, f"{self._suppressed} more lines")
+            self._safe(self._backend.speak, _backlog_notice(self._suppressed))
             self._suppressed = 0
         self._safe(self._backend.speak, text)
 

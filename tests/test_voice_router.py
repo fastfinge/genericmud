@@ -9,11 +9,11 @@ from tests.helpers import RecordingBackend
 def test_governor_coalesces_burst_then_summarizes():
     backend = RecordingBackend()
     clock = [0.0]
-    router = VoiceRouter(backend, rate=5, clock=lambda: clock[0])
+    router = VoiceRouter(backend, rate=5, burst=5, clock=lambda: clock[0])
 
     for i in range(12):
         router.speak(f"line{i}")
-    # capacity 5: first five spoken, the rest suppressed
+    # burst 5: first five spoken, the rest suppressed
     assert backend.spoken == ["line0", "line1", "line2", "line3", "line4"]
 
     clock[0] = 10.0  # let the bucket refill
@@ -22,9 +22,25 @@ def test_governor_coalesces_burst_then_summarizes():
     assert backend.spoken[6] == "after"
 
 
+def test_a_screenful_arriving_at_once_is_not_coalesced():
+    """A room description / who list lands in one packet -- it must not trip the governor.
+
+    Regression: burst capacity used to be welded to the sustained rate, so any arrival
+    over 20 lines was truncated with an "N more lines" notice at zero elapsed time.
+    """
+    backend = RecordingBackend()
+    router = VoiceRouter(backend, clock=lambda: 0.0)  # defaults, no time passes
+
+    for i in range(60):
+        router.speak(f"line{i}")
+
+    assert backend.spoken == [f"line{i}" for i in range(60)]
+    assert not any("more line" in spoken for spoken in backend.spoken)
+
+
 def test_non_governed_channel_not_throttled():
     backend = RecordingBackend()
-    router = VoiceRouter(backend, rate=1, clock=lambda: 0.0)
+    router = VoiceRouter(backend, rate=1, burst=1, clock=lambda: 0.0)
     router.speak("a", channel="tell")
     router.speak("b", channel="tell")
     router.speak("c", channel="tell")
@@ -42,15 +58,15 @@ def test_interrupt_stops_before_speaking():
 def test_flush_stops_and_clears_backlog():
     backend = RecordingBackend()
     clock = [0.0]
-    router = VoiceRouter(backend, rate=1, clock=lambda: clock[0])
+    router = VoiceRouter(backend, rate=1, burst=1, clock=lambda: clock[0])
     router.speak("x")
-    router.speak("y")  # suppressed (capacity 1)
+    router.speak("y")  # suppressed (burst 1)
     router.flush()
     assert backend.stops >= 1
     clock[0] = 100.0
     router.speak("z")
     assert "z" in backend.spoken
-    assert not any("more lines" in s for s in backend.spoken)
+    assert not any("more line" in s for s in backend.spoken)  # matches singular and plural
 
 
 def test_muted_passthrough_speaks_nothing():
@@ -64,7 +80,7 @@ def test_muted_passthrough_speaks_nothing():
 def test_interrupt_stops_speech_but_keeps_the_suppressed_backlog():
     backend = RecordingBackend()
     clock = [0.0]
-    router = VoiceRouter(backend, rate=2, clock=lambda: clock[0])
+    router = VoiceRouter(backend, rate=2, burst=2, clock=lambda: clock[0])
     router.speak("one")
     router.speak("two")
     router.speak("dropped")  # over budget: suppressed
@@ -72,4 +88,4 @@ def test_interrupt_stops_speech_but_keeps_the_suppressed_backlog():
     assert backend.stops == 1
     clock[0] = 10.0
     router.speak("after")
-    assert "1 more lines" in backend.spoken  # the backlog notice survived the interrupt
+    assert "1 more line" in backend.spoken  # the backlog notice survived the interrupt
