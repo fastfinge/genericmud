@@ -22,6 +22,18 @@ jobs:
       - name: Test
         run: python -m pytest -q
 
+      # Fill the release body from CHANGELOG.md. self_update.check_for_update hands the
+      # body straight to the in-app update dialog as its notes, so this text is what a
+      # user deciding whether to update actually hears. Runs here rather than beside the
+      # publish step so a tag with no CHANGELOG section fails in seconds instead of after
+      # the whole Windows build.
+      - name: Extract release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          python tools/extract_changelog.py CHANGELOG.md "${{ github.ref_name }}" release_notes.md
+          cat release_notes.md
+
       # Build ZipExtractor.exe from ravibpatel/AutoUpdater.NET (MIT) -- the self-update
       # helper (the same one Libation uses): it waits on our PID, overlays the update zip on
       # the install, uses Windows Restart Manager to diagnose locked files, and relaunches us.
@@ -84,5 +96,11 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "genericMud $TAG" \
             --prerelease \
-            --notes "Automated build. Unzip the folder and run genericMud.exe (a console app: \`genericMud.exe <host> <port> [--tls]\`). Self-voices through your screen reader — the NVDA controller DLLs are bundled, with a SAPI5 fallback. Portable: soundpacks, worlds, and logs are stored in genericmud-data beside the exe, so the whole folder is self-contained. Windows UI unverified." \
-          || gh release upload "$TAG" dist/genericMud-windows.zip --repo "$GITHUB_REPOSITORY" --clobber
+            --notes-file release_notes.md \
+          || {
+            # Re-run over an existing release: refresh the asset AND the notes, or a
+            # corrected CHANGELOG would never reach the release the updater reads.
+            gh release upload "$TAG" dist/genericMud-windows.zip \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release_notes.md
+          }
