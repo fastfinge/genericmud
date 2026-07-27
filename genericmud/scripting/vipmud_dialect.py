@@ -163,18 +163,87 @@ def tokenize_statements(source: str) -> list[tuple[str | None, list[_Tok]]]:
     return statements
 
 
+def _scan_char_class(pattern: str, start: int) -> int | None:
+    """End index (exclusive) of the ``[...]`` class opening at ``start``, or None if unclosed.
+
+    Follows the regex rule that a ``]`` in the first position (after an optional ``^``) is a
+    member rather than the terminator. That rule is the whole point here: it is how packs
+    write a literal bracket, ``[[]`` for ``[`` and ``[]]`` for ``]``.
+    """
+    i = start + 1
+    if i < len(pattern) and pattern[i] == "^":
+        i += 1
+    if i < len(pattern) and pattern[i] == "]":
+        i += 1
+    while i < len(pattern):
+        if pattern[i] == "]":
+            return i + 1
+        i += 1
+    return None
+
+
+def _char_class(source: str) -> str:
+    """Normalise a ``[...]`` group into an equivalent regex character class.
+
+    Bracket members are re-escaped, so ``[[]`` becomes ``[\\[]``: identical in meaning, but
+    it keeps Python's "possible nested set" FutureWarning out of the user's console every
+    time the pack loads. Falls back to escaping the whole group as a literal if the result
+    still will not compile, so a malformed class can never kill a pack load.
+    """
+    body = source[1:-1]
+    negated = body.startswith("^")
+    if negated:
+        body = body[1:]
+    members: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] == "\\" and i + 1 < len(body):
+            members.append(body[i : i + 2])  # an existing escape passes through intact
+            i += 2
+            continue
+        members.append("\\" + body[i] if body[i] in "[]" else body[i])
+        i += 1
+    candidate = f"[{'^' if negated else ''}{''.join(members)}]"
+    try:
+        re.compile(candidate)
+    except re.error:
+        return re.escape(source)
+    return candidate
+
+
 def vip_pattern_to_regex(pattern: str) -> str:
     """Convert a VIPMud wildcard pattern to a regex with named/numbered captures.
 
     ``&{name}``/``&name`` -> a named group (read at fire time as ``@name``); ``*`` ->
     a numbered group; ``?`` -> one char. A wildcard at the very end takes the rest
     (greedy); a bounded one is non-greedy so the following literal delimits it.
+
+    ``[...]`` is a character class and passes through, because that is what VIPMud does and
+    packs depend on it: channel triggers are written ``[[]*] * *`` to match a line like
+    ``[General Communication] Someone transmits, "..."``. Escaping the brackets as literals
+    instead produced a regex demanding three characters, ``[[]``, and every channel trigger
+    in the Star Conquest pack silently matched nothing.
     """
     out: list[str] = []
-    last = 0
-    for match in _PATTERN_WILDCARD_RE.finditer(pattern):
-        out.append(re.escape(pattern[last : match.start()]))
-        body = ".*" if match.end() == len(pattern) else ".*?"
+    literal_start = 0
+    i = 0
+    end = len(pattern)
+    while i < end:
+        if pattern[i] == "[":
+            close = _scan_char_class(pattern, i)
+            if close is None:  # unclosed: an ordinary literal bracket
+                i += 1
+                continue
+            out.append(re.escape(pattern[literal_start:i]))
+            out.append(_char_class(pattern[i:close]))
+            i = literal_start = close
+            continue
+        match = _PATTERN_WILDCARD_RE.match(pattern, i)
+        if match is None:
+            i += 1
+            continue
+        out.append(re.escape(pattern[literal_start : match.start()]))
+        body = ".*" if match.end() == end else ".*?"
         name = match.group(1) or match.group(2)
         if name:
             out.append(f"(?P<{name}>{body})")
@@ -182,8 +251,8 @@ def vip_pattern_to_regex(pattern: str) -> str:
             out.append(f"({body})")
         else:  # ?
             out.append("(.)")
-        last = match.end()
-    out.append(re.escape(pattern[last:]))
+        i = literal_start = match.end()
+    out.append(re.escape(pattern[literal_start:]))
     return "".join(out)
 
 

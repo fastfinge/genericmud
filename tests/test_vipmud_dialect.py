@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import re
+import warnings
+
+import pytest
+
 from genericmud.automation.engine import AutomationEngine
 from genericmud.model.buffer import Line
 from genericmud.scripting.api import ScriptApi
@@ -11,6 +16,7 @@ from genericmud.scripting.vipmud_dialect import (
     _parse_vip_settings,
     _serialize_vip_settings,
     tokenize_statements,
+    vip_pattern_to_regex,
 )
 from tests.helpers import RecordingSink
 
@@ -345,3 +351,66 @@ def test_unvar_deletes_for_defined(tmp_path):
     )
     engine.process_line(Line("setup"))
     assert [s[0] for s in sink.spoken] == ["gone"]
+
+
+# --- character classes in patterns ---
+#
+# Real patterns lifted from the Star Conquest pack (sc-release-full), matched against real
+# lines from a session transcript. Every one of these silently matched nothing before
+# vip_pattern_to_regex learned that [...] is a class: the packs write a literal bracket as
+# "[[]", and escaping it produced a regex demanding the three characters "[[]".
+
+CHANNEL_CASES = [
+    ("[[]*] * *", '[General Communication] Sam Caldwell transmits, "Hello all."'),
+    ("[[]*] * *", '[Fringe | 10: Conquest Status] A liaison transmits, "Come on!"'),
+    ("[[]CrewFinder] *", "[CrewFinder] Someone is recruiting."),
+    ("[[]Notification from *] *", "[Notification from Ops] Report in."),
+    ('[[]Mentor Channel[]] * says, "*"', '[Mentor Channel] Tutor says, "Welcome aboard."'),
+    ("[[]*[]] Jump In: *", "[Rustbucket] Jump In: Sol system."),
+]
+
+
+@pytest.mark.parametrize(("pattern", "line"), CHANNEL_CASES)
+def test_bracketed_channel_patterns_match_their_lines(pattern, line):
+    assert re.search(vip_pattern_to_regex(pattern), line)
+
+
+def test_literal_bracket_class_captures_the_channel_name():
+    match = re.search(vip_pattern_to_regex("[[]*] * *"), "[General Communication] Sam waves.")
+    assert match is not None
+    assert match.group(1) == "General Communication"
+
+
+def test_a_class_of_alternatives_matches_either_member():
+    # "[ [ ]" is "a space or a bracket" -- some of these lines arrive with a leading space.
+    regex = vip_pattern_to_regex("[ [ ]MTTS] *: *")
+    assert re.search(regex, " MTTS] Someone: hello")
+    assert re.search(regex, "[MTTS] Someone: hello")
+
+
+def test_negated_class_is_preserved():
+    regex = vip_pattern_to_regex("say [^0-9]*")
+    assert re.search(regex, "say hello")
+    assert not re.search(regex, "say 9 lives")
+
+
+def test_an_unclosed_bracket_stays_a_literal():
+    assert re.search(vip_pattern_to_regex("cost [50 credits"), "cost [50 credits")
+
+
+def test_a_malformed_class_falls_back_to_a_literal_rather_than_failing_the_load():
+    # "[z-a]" is a bad range; escaping beats raising, which would kill the whole pack load.
+    assert re.search(vip_pattern_to_regex("range [z-a] here"), "range [z-a] here")
+
+
+def test_bracket_patterns_compile_without_a_nested_set_warning():
+    # Python warns on "[[]"; the converter emits "[\[]" instead so packs load quietly.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        for pattern, _line in CHANNEL_CASES:
+            re.compile(vip_pattern_to_regex(pattern))
+
+
+def test_plain_patterns_are_unchanged_by_the_class_support():
+    assert vip_pattern_to_regex("You see * here.") == r"You\ see\ (.*?)\ here\."
+    assert vip_pattern_to_regex("?Enter ?yes' or ?no'?") == r"(.)Enter\ (.)yes'\ or\ (.)no'(.)"
