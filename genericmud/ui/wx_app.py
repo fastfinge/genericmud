@@ -77,6 +77,7 @@ from genericmud.session.diaglog import DiagnosticLog, make_diagnostic_log
 from genericmud.session.hub import SessionHub
 from genericmud.sound.pygame_backend import make_pygame_backend
 from genericmud.transport.connection import MudConnection
+from genericmud.ui.scrollback import anchor_after_append
 from genericmud.update import self_update
 from genericmud.voice.factory import make_voice_backend
 from genericmud.voice.router import VoiceRouter
@@ -223,6 +224,7 @@ class SessionPanel(wx.Panel):
         self.input.Bind(wx.EVT_TEXT_ENTER, self._on_send)
         self.input.Bind(wx.EVT_KEY_DOWN, self._on_input_key)
         self.output.Bind(wx.EVT_CHAR, self._on_output_char)
+        self.output.Bind(wx.EVT_SET_FOCUS, self._on_output_focus)
 
         asyncio.run_coroutine_threadsafe(self._start(), loop)
 
@@ -336,16 +338,44 @@ class SessionPanel(wx.Panel):
         self._flush_scheduled = False
         if not self._alive or not self._pending:
             return
+        # Someone who has tabbed into the output is arrowing back through it, and
+        # AppendText would drag their caret to the end on every arriving line. Pin it
+        # instead: landing at the bottom is what focusing the control does (see
+        # _on_output_focus), not what incoming text does.
+        anchor = self.output.GetInsertionPoint() if self.output.HasFocus() else None
         self.output.AppendText("\n".join(self._pending) + "\n")
         self._pending.clear()
-        self._trim_output()
+        removed = self._trim_output()
+        if anchor is not None:
+            target = anchor_after_append(anchor, removed, self.output.GetLastPosition())
+            self.output.SetInsertionPoint(target)
+            self.output.ShowPosition(target)
 
-    def _trim_output(self) -> None:
+    def _trim_output(self) -> int:
+        """Drop the oldest lines past the cap; returns the character count removed.
+
+        The count matters to a caller restoring a review caret: removing from the front
+        shifts every remaining offset down by exactly this much.
+        """
         excess = self.output.GetNumberOfLines() - _OUTPUT_CAP_LINES
-        if excess > 0:
-            end = self.output.XYToPosition(0, excess)
-            if end > 0:
-                self.output.Remove(0, end)
+        if excess <= 0:
+            return 0
+        end = self.output.XYToPosition(0, excess)
+        if end <= 0:
+            return 0
+        self.output.Remove(0, end)
+        return end
+
+    def _on_output_focus(self, event: wx.FocusEvent) -> None:
+        """Tabbing in from the command box lands on the newest line.
+
+        This is the only thing that moves a reader to the bottom; arriving MUD text
+        deliberately does not. Done synchronously rather than via CallAfter so the caret
+        is already at the end when the screen reader reads the newly focused control.
+        """
+        self.output.SetInsertionPointEnd()
+        self.output.ShowPosition(self.output.GetLastPosition())
+        event.Skip()
 
     def _on_send(self, _event: wx.CommandEvent) -> None:
         text = self.input.GetValue()
