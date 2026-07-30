@@ -7,6 +7,7 @@ export class Audio {
     this.ctx = new Ctx();
     this.buffers = new Map();
     this.channels = new Map();
+    this.generations = new Map();  // per-channel cue counter; a stale load must not play
     this.onError = onError || (() => {});  // report load/decode failures, don't swallow them
   }
 
@@ -27,6 +28,9 @@ export class Audio {
   }
 
   async play(message) {
+    const channel = message.channel || "sound";
+    const generation = (this.generations.get(channel) || 0) + 1;
+    this.generations.set(channel, generation);
     let buffer;
     try {
       buffer = await this._load(message.file);
@@ -34,6 +38,11 @@ export class Audio {
       this.onError({ file: message.file, error: String((e && e.message) || e) });
       return;
     }
+    if (this.generations.get(channel) !== generation) return;  // superseded while loading
+    // The bus contract: a new cue on the SAME logical channel replaces the running one
+    // (native packs rely on it, and every music change would otherwise stack another
+    // loop forever). Overlap comes from distinct channels, which the shims mint freely.
+    this.stop(channel);
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
     source.loop = !!message.loop;
@@ -43,7 +52,7 @@ export class Audio {
     panner.pan.value = message.pan ?? 0;
     source.connect(gain).connect(panner).connect(this.ctx.destination);
     source.start();
-    this._track(message.channel || "sound", source);
+    this._track(channel, source);
   }
 
   stop(channel) {
