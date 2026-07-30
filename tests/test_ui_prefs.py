@@ -27,3 +27,20 @@ def test_corrupt_file_gives_defaults_not_a_crash(tmp_path):
     path = tmp_path / "ui-prefs.toml"
     path.write_text("[ui\nnot toml", encoding="utf-8")
     assert load_ui_prefs(path) == UiPrefs()
+
+
+def test_wrong_types_use_defaults_while_valid_values_survive(tmp_path):
+    path = tmp_path / "ui-prefs.toml"
+    path.write_text(
+        '[ui]\nbackground_silence = true\nnumpad_compass = "false"\n',
+        encoding="utf-8",
+    )
+    prefs = load_ui_prefs(path)
+    assert prefs.background_silence is True
+    assert prefs.numpad_compass is True
+
+
+def test_non_table_ui_section_uses_defaults(tmp_path):
+    path = tmp_path / "ui-prefs.toml"
+    path.write_text('ui = "not a table"\n', encoding="utf-8")
+    assert load_ui_prefs(path) == UiPrefs()

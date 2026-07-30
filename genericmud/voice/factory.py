@@ -14,7 +14,15 @@ from genericmud.voice.backends.base import VoiceBackend
 
 class PrintBackend(VoiceBackend):
     def speak(self, text: str) -> None:
-        print("SPEAK:", text)
+        # A PyInstaller ``--windowed`` process has no stdout. This backend is the
+        # last resort when native speech is unavailable, so it must degrade to
+        # silence instead of crashing every UI announcement.
+        if sys.stdout is None:
+            return
+        try:
+            print("SPEAK:", text)
+        except (OSError, ValueError):
+            return
 
     def stop(self) -> None:
         pass

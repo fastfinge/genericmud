@@ -38,7 +38,14 @@ from genericmud.completion import CompletionCycler
 from genericmud.config.keymap import load_keymap
 from genericmud.config.ui_prefs import UiPrefs, load_ui_prefs, save_ui_prefs
 from genericmud.config.update_prefs import is_snoozed, load_prefs, save_prefs, snooze_timestamp
-from genericmud.config.worlds import World, config_dir, load_worlds, save_worlds
+from genericmud.config.worlds import (
+    DEFAULT_PORT,
+    World,
+    config_dir,
+    load_worlds,
+    parse_port,
+    save_worlds,
+)
 from genericmud.packs import (
     PackError,
     PackStore,
@@ -58,6 +65,7 @@ from genericmud.packs import (
     world_from_pack,
 )
 from genericmud.packs.manifest import CODE_EXEC_DIALECTS
+from genericmud.packs.store import extract_pack
 from genericmud.packs.user_rules import (
     MATCH_CHOICES,
     UserAlias,
@@ -67,10 +75,11 @@ from genericmud.packs.user_rules import (
     UserTrigger,
     copy_sound_into_pack,
     load_rules,
+    register_rules,
     save_rules,
 )
-from genericmud.packs.store import extract_pack
 from genericmud.packs.world_share import export_world, import_world
+from genericmud.scripting.api import ScriptApi
 from genericmud.session.crashlog import install_loop_exception_handler
 from genericmud.session.credentials import PlaintextCredentialStore
 from genericmud.session.diaglog import DiagnosticLog, make_diagnostic_log
@@ -206,6 +215,7 @@ class SessionPanel(wx.Panel):
         self._completion_tail = ""  # text after the caret when the completion run began
         self._find = FindState()  # sticky across searches; F3 repeats whatever is in here
         self._find_direction = False  # direction of the search in flight, for the caret sync
+        self._find_restart = False  # next result starts from an output edge, inclusively
         self._keep_caret_on_focus = False  # one-shot: don't jump to the bottom this time
 
         # NVDA reads a control's name from a wx.StaticText created immediately
@@ -391,26 +401,24 @@ class SessionPanel(wx.Panel):
     # --- find (output only) ---
 
     def _on_output_key(self, event: wx.KeyEvent) -> None:
-        """Find keys, live only while the output has focus: Ctrl+F, F3, Shift+F3.
-
-        Bound on the control rather than routed through the keymap on purpose -- the
-        keymap fires wherever focus is, and Find is meaningless from the command box.
-        """
+        """Find keys, live only while the output has focus: Ctrl+F, F3, Shift+F3."""
         code = event.GetKeyCode()
-        if code == ord("F") and event.ControlDown() and not event.AltDown():
+        if (
+            code == ord("F")
+            and event.ControlDown()
+            and not event.AltDown()
+            and not event.ShiftDown()
+        ):
             self._open_find()
             return
-        if code == wx.WXK_F3:
+        if code == wx.WXK_F3 and not event.ControlDown() and not event.AltDown():
             self._find_again(reverse=event.ShiftDown())
             return
         event.Skip()
 
     def _open_find(self) -> None:
-        # Armed for the whole dialog round trip, not after it: closing the dialog hands
-        # focus back to the output during ShowModal/Destroy, and that arrival must not
-        # throw the caret to the bottom -- the search runs from wherever the reader was.
-        # Cleared in a finally so a cancelled search can't leave it armed and eat the
-        # jump-to-bottom on the next genuine tab-in.
+        # Closing the modal dialog briefly restores focus to output. Preserve its
+        # caret until the result arrives instead of jumping to the bottom on focus.
         self._keep_caret_on_focus = True
         try:
             dialog = FindDialog(self, self._find)
@@ -421,10 +429,10 @@ class SessionPanel(wx.Panel):
             if state is None or not state.term:
                 return
             self._find = state
-            self.output.SetFocus()  # the search runs from the caret, so go back to it first
+            self.output.SetFocus()
         finally:
             self._keep_caret_on_focus = False
-        self._run_find(self._find.forward)
+        self._run_find(self._find.forward, restart=True)
 
     def _find_again(self, *, reverse: bool) -> None:
         """F3 repeats the last search; Shift+F3 repeats it the other way for one hop."""
@@ -433,14 +441,18 @@ class SessionPanel(wx.Panel):
             return
         self._run_find(not self._find.forward if reverse else self._find.forward)
 
-    def _run_find(self, forward: bool) -> None:
+    def _run_find(self, forward: bool, *, restart: bool = False) -> None:
         if self.app is None:
             return
         self._find_direction = forward  # _sync_find_caret needs the direction actually used
+        self._find_restart = restart
         self._loop.call_soon_threadsafe(
             self.app.on_ws_message,
             protocol.find(
-                self._find.term, forward=forward, case_sensitive=self._find.case_sensitive
+                self._find.term,
+                forward=forward,
+                case_sensitive=self._find.case_sensitive,
+                restart=restart,
             ),
         )
 
@@ -451,14 +463,19 @@ class SessionPanel(wx.Panel):
         _OUTPUT_CAP_LINES. A match older than that leaves the caret alone and the spoken
         line is all the reader gets, which beats moving them somewhere wrong.
         """
+        restart = self._find_restart
+        self._find_restart = False
         if not message.get("found"):
             return
+        text = self.output.GetValue()
+        matched_line = message.get("text", "")
         offset = find_offset(
-            self.output.GetValue(),
-            message.get("text", ""),
+            text,
+            matched_line,
             self.output.GetInsertionPoint(),
             forward=self._find_direction,
-            case_sensitive=True,  # matching the engine's own line text back, verbatim
+            case_sensitive=True,  # engine returned the exact rendered line
+            from_edge=restart,
         )
         if offset is None:
             return
@@ -669,34 +686,35 @@ class FindDialog(wx.Dialog):
         )
 
 
-class ConnectDialog(wx.Dialog):
+_ID_NEW_WORLD = wx.ID_HIGHEST + 1
+_ID_EDIT_WORLD = wx.ID_HIGHEST + 2
+
+
+class WorldDialog(wx.Dialog):
+    """Create or edit connection details for one world."""
+
     def __init__(
         self,
         parent: wx.Window,
-        saved: list[World],
         initial: World | None = None,
         *,
+        title: str = "New World",
         offer_trust: bool = False,
-        save_default: bool = False,
-    ):
-        super().__init__(parent, title="Connect to a MUD")
-        self._saved = saved
+        save_default: bool = True,
+        show_save: bool = True,
+        lock_name: bool = False,
+    ) -> None:
+        super().__init__(parent, title=title)
+        self._world: World | None = None
         grid = wx.FlexGridSizer(0, 2, 6, 6)
         grid.AddGrowableCol(1)
 
         # Each StaticText is created (and added) immediately before its control so the
         # label precedes the control in z-order -- the association NVDA reads on
         # Windows. Checkboxes carry their own label= as the accessible name.
-        grid.Add(wx.StaticText(self, label="&Saved world:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self._choice = wx.Choice(self, choices=["(new)"] + [w.name for w in saved])
-        self._choice.SetName("Saved world")
-        self._choice.SetSelection(0)
-        self._choice.Bind(wx.EVT_CHOICE, self._on_pick)
-        grid.Add(self._choice, 1, wx.EXPAND)
-
         self._name = self._labeled_text(grid, "&Name:", "Name")
         self._host = self._labeled_text(grid, "&Host:", "Host")
-        self._port = self._labeled_text(grid, "&Port:", "Port", "4000")
+        self._port = self._labeled_text(grid, "&Port:", "Port", str(DEFAULT_PORT))
         self._sounds = self._labeled_text(grid, "So&unds folder:", "Sounds folder")
 
         grid.Add((0, 0))
@@ -704,11 +722,13 @@ class ConnectDialog(wx.Dialog):
         self._tls.SetName("Use TLS")
         grid.Add(self._tls, 1, wx.EXPAND)
 
-        grid.Add((0, 0))
-        self._save = wx.CheckBox(self, label="Sa&ve this world")
-        self._save.SetName("Save this world")
-        self._save.SetValue(save_default)
-        grid.Add(self._save, 1, wx.EXPAND)
+        self._save: wx.CheckBox | None = None
+        if show_save:
+            grid.Add((0, 0))
+            self._save = wx.CheckBox(self, label="Sa&ve this world")
+            self._save.SetName("Save this world")
+            self._save.SetValue(save_default)
+            grid.Add(self._save, 1, wx.EXPAND)
 
         # Offered only for a freshly-installed code-executing pack (MUSHclient): it stays silent
         # until trusted, so this is where the user consents to run it. Checked by default -- they
@@ -727,13 +747,23 @@ class ConnectDialog(wx.Dialog):
         sizer.Add(grid, 1, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL), 0, wx.EXPAND | wx.ALL, 8)
         self.SetSizerAndFit(sizer)
+        self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
 
-        if initial is not None:  # prefill from a pack-derived world (the setup wizard)
+        if initial is not None:
             self._name.SetValue(initial.name)
             self._host.SetValue(initial.host)
-            self._port.SetValue(str(initial.port))
+            try:
+                initial_port = parse_port(initial.port)
+            except ValueError:
+                initial_port = DEFAULT_PORT
+            self._port.SetValue(str(initial_port))
             self._tls.SetValue(initial.tls)
             self._sounds.SetValue(initial.sounds or "")
+        if lock_name:
+            self._name.Enable(False)
+            self._host.SetFocus()
+        else:
+            self._name.SetFocus()
 
     def _labeled_text(
         self, grid: wx.FlexGridSizer, label: str, name: str, value: str = ""
@@ -744,36 +774,115 @@ class ConnectDialog(wx.Dialog):
         grid.Add(ctrl, 1, wx.EXPAND)
         return ctrl
 
-    def _on_pick(self, _event: wx.CommandEvent) -> None:
-        index = self._choice.GetSelection() - 1
-        if 0 <= index < len(self._saved):
-            world = self._saved[index]
-            self._name.SetValue(world.name)
-            self._host.SetValue(world.host)
-            self._port.SetValue(str(world.port))
-            self._tls.SetValue(world.tls)
-            self._sounds.SetValue(world.sounds or "")
-
-    def get_world(self) -> World:
-        name = self._name.GetValue().strip() or self._host.GetValue().strip()
+    def _on_ok(self, _event: wx.CommandEvent) -> None:
+        host = self._host.GetValue().strip()
+        if not host:
+            wx.MessageBox(
+                "Enter the MUD's host name.", "World details", wx.OK | wx.ICON_ERROR, self
+            )
+            self._host.SetFocus()
+            return
         try:
-            port = int(self._port.GetValue().strip())
-        except ValueError:
-            port = 4000
-        return World(
-            name=name,
-            host=self._host.GetValue().strip(),
+            port = parse_port(self._port.GetValue())
+        except ValueError as error:
+            wx.MessageBox(str(error), "World details", wx.OK | wx.ICON_ERROR, self)
+            self._port.SetFocus()
+            self._port.SelectAll()
+            return
+        self._world = World(
+            name=self._name.GetValue().strip() or host,
+            host=host,
             port=port,
             tls=self._tls.GetValue(),
             sounds=self._sounds.GetValue().strip() or None,
         )
+        self.EndModal(wx.ID_OK)
+
+    def get_world(self) -> World:
+        if self._world is None:
+            raise RuntimeError("world requested before the dialog was accepted")
+        return self._world
 
     def should_save(self) -> bool:
-        return self._save.GetValue()
+        return self._save is None or self._save.GetValue()
 
     def should_trust(self) -> bool:
         """True if the trust checkbox was offered and left checked (else False)."""
         return self._trust is not None and self._trust.GetValue()
+
+
+class ConnectDialog(wx.Dialog):
+    """Choose an existing saved world; creation and editing use ``WorldDialog``."""
+
+    def __init__(self, parent: wx.Window, saved: list[World]) -> None:
+        super().__init__(parent, title="Connect to a Saved World", size=(460, 320))
+        self._saved = sorted(saved, key=lambda world: world.name.casefold())
+        outer = wx.BoxSizer(wx.VERTICAL)
+
+        outer.Add(wx.StaticText(self, label="&Saved worlds:"), 0, wx.LEFT | wx.TOP, 10)
+        self._choice = wx.ListBox(self, choices=[world.name for world in self._saved])
+        self._choice.SetName("Saved worlds")
+        self._choice.Bind(wx.EVT_LISTBOX, self._on_pick)
+        self._choice.Bind(wx.EVT_LISTBOX_DCLICK, self._on_connect)
+        outer.Add(self._choice, 1, wx.ALL | wx.EXPAND, 10)
+
+        outer.Add(wx.StaticText(self, label="Connection &details:"), 0, wx.LEFT, 10)
+        self._details = wx.TextCtrl(
+            self, style=wx.TE_MULTILINE | wx.TE_READONLY, size=(-1, 64)
+        )
+        self._details.SetName("Connection details")
+        outer.Add(self._details, 0, wx.ALL | wx.EXPAND, 10)
+
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        self._connect = wx.Button(self, wx.ID_OK, "&Connect")
+        self._connect.Bind(wx.EVT_BUTTON, self._on_connect)
+        edit = wx.Button(self, _ID_EDIT_WORLD, "&Edit...")
+        edit.Bind(wx.EVT_BUTTON, self._on_edit)
+        new = wx.Button(self, _ID_NEW_WORLD, "&New World...")
+        new.Bind(wx.EVT_BUTTON, lambda _event: self.EndModal(_ID_NEW_WORLD))
+        buttons.Add(self._connect, 0, wx.RIGHT, 6)
+        buttons.Add(edit, 0, wx.RIGHT, 6)
+        buttons.Add(new, 0, wx.RIGHT, 6)
+        buttons.Add(wx.Button(self, wx.ID_CANCEL, "C&ancel"), 0)
+        outer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 10)
+        self.SetSizer(outer)
+
+        enabled = bool(self._saved)
+        self._connect.Enable(enabled)
+        edit.Enable(enabled)
+        if enabled:
+            self._choice.SetSelection(0)
+            self._update_details()
+            self._connect.SetDefault()
+            self._choice.SetFocus()
+        else:
+            self._details.SetValue("No saved worlds. Choose New World to create one.")
+            new.SetDefault()
+            new.SetFocus()
+
+    def _on_pick(self, _event: wx.CommandEvent) -> None:
+        self._update_details()
+
+    def _update_details(self) -> None:
+        world = self.get_world()
+        if world is None:
+            self._details.SetValue("")
+            return
+        security = "TLS" if world.tls else "plain connection"
+        sounds = f"\nSounds: {world.sounds}" if world.sounds else ""
+        self._details.SetValue(f"{world.host}:{world.port} ({security}){sounds}")
+
+    def _on_connect(self, _event: wx.CommandEvent) -> None:
+        if self.get_world() is not None:
+            self.EndModal(wx.ID_OK)
+
+    def _on_edit(self, _event: wx.CommandEvent) -> None:
+        if self.get_world() is not None:
+            self.EndModal(_ID_EDIT_WORLD)
+
+    def get_world(self) -> World | None:
+        index = self._choice.GetSelection()
+        return self._saved[index] if 0 <= index < len(self._saved) else None
 
 
 class PackManagerDialog(wx.Dialog):
@@ -782,7 +891,7 @@ class PackManagerDialog(wx.Dialog):
     Operates on filesystem state only (install/enable/trust); changes take effect
     the next time the world is connected, since packs activate on connect. Every
     control gets a preceding StaticText label + SetName for NVDA, matching
-    ConnectDialog.
+    WorldDialog.
     """
 
     _WILDCARD = (
@@ -1621,7 +1730,26 @@ class RulesBuilderDialog(wx.Dialog):
     def _save_and_reload(self) -> None:
         if self._pack_dir is None:
             return
-        save_rules(self._pack_dir, self._rules)
+        try:
+            register_rules(
+                ScriptApi(
+                    AutomationEngine(),
+                    source="user-rule-validation",
+                    base_dir=str(self._pack_dir),
+                ),
+                self._rules,
+            )
+            save_rules(self._pack_dir, self._rules)
+        except Exception as error:  # noqa: BLE001 - validation/storage errors stay in the editor
+            wx.MessageBox(
+                f"Rule not saved: {error}",
+                "Soundpack Builder",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            self._rules = load_rules(self._pack_dir)
+            self._refresh()
+            return
         panel = self._panel
         if panel.app is not None:
             panel._loop.call_soon_threadsafe(panel.app.reload_user_rules)
@@ -1734,7 +1862,7 @@ _ID_SKIP = wx.ID_HIGHEST + 104
 class UpdateNotificationDialog(wx.Dialog):
     """Announce a newer genericMud and offer what to do about it.
 
-    Follows ConnectDialog's accessibility pattern: a StaticText precedes each control and
+    Follows WorldDialog's accessibility pattern: a StaticText precedes each control and
     every control gets SetName so NVDA reads it. Release notes sit in a focusable read-only
     text box the user can review line by line. ShowModal returns one of the module ``_ID_*``
     actions, or wx.ID_CANCEL if the dialog is closed. "Update Now" only appears on a build
@@ -1859,7 +1987,8 @@ class GenericMudFrame(wx.Frame):
 
         menubar = wx.MenuBar()
         file_menu = wx.Menu()
-        connect_item = file_menu.Append(wx.ID_ANY, "&Connect...\tCtrl+N")
+        new_world_item = file_menu.Append(wx.ID_ANY, "&New World...\tCtrl+N")
+        connect_item = file_menu.Append(wx.ID_ANY, "&Connect to Saved World...\tCtrl+O")
         disconnect_item = file_menu.Append(wx.ID_ANY, "&Disconnect\tCtrl+D")
         close_item = file_menu.Append(wx.ID_ANY, "Close &Tab\tCtrl+W")
         packs_item = file_menu.Append(wx.ID_ANY, "&Manage Soundpacks...\tCtrl+P")
@@ -1919,6 +2048,7 @@ class GenericMudFrame(wx.Frame):
             shortcuts_item,
         )
         self.Bind(wx.EVT_MENU, self._on_about, about_item)
+        self.Bind(wx.EVT_MENU, self._on_new_world, new_world_item)
         self.Bind(wx.EVT_MENU, self._on_connect, connect_item)
         self.Bind(wx.EVT_MENU, self._on_disconnect, disconnect_item)
         self.Bind(wx.EVT_MENU, self._on_close_tab, close_item)
@@ -1998,16 +2128,80 @@ class GenericMudFrame(wx.Frame):
             "Numpad compass on." if self._prefs.numpad_compass else "Numpad compass off."
         )
 
-    def _on_connect(self, _event: wx.CommandEvent) -> None:
-        dialog = ConnectDialog(self, load_worlds())
-        if dialog.ShowModal() == wx.ID_OK:
+    def _on_new_world(self, _event: wx.CommandEvent) -> None:
+        self._show_world_dialog()
+
+    def _show_world_dialog(
+        self,
+        *,
+        initial: World | None = None,
+        title: str = "New World",
+        connect: bool = True,
+        original_name: str | None = None,
+        show_save: bool = True,
+        lock_name: bool = False,
+    ) -> bool:
+        dialog = WorldDialog(
+            self,
+            initial,
+            title=title,
+            save_default=True,
+            show_save=show_save,
+            lock_name=lock_name,
+        )
+        try:
+            if dialog.ShowModal() != wx.ID_OK:
+                return False
             world = dialog.get_world()
-            if world.host:
-                if dialog.should_save():
-                    worlds = [w for w in load_worlds() if w.name != world.name] + [world]
-                    save_worlds(worlds)
+            saved = True
+            if dialog.should_save():
+                saved = self._save_world(world, replacing=original_name)
+            if connect:
                 self.open_session(world)
-        dialog.Destroy()
+            return saved
+        finally:
+            dialog.Destroy()
+
+    def _save_world(self, world: World, *, replacing: str | None = None) -> bool:
+        replaced = {world.name.casefold()}
+        if replacing:
+            replaced.add(replacing.casefold())
+        worlds = [saved for saved in load_worlds() if saved.name.casefold() not in replaced]
+        try:
+            save_worlds(worlds + [world])
+        except (OSError, ValueError) as error:
+            wx.MessageBox(
+                f"Couldn't save {world.name}: {error}",
+                "Save World",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return False
+        return True
+
+    def _on_connect(self, _event: wx.CommandEvent) -> None:
+        while True:
+            dialog = ConnectDialog(self, load_worlds())
+            action = dialog.ShowModal()
+            world = dialog.get_world()
+            dialog.Destroy()
+            if action == wx.ID_OK and world is not None:
+                self.open_session(world)
+                return
+            if action == _ID_NEW_WORLD:
+                self._show_world_dialog()
+                return
+            if action == _ID_EDIT_WORLD and world is not None:
+                self._show_world_dialog(
+                    initial=world,
+                    title=f"Edit {world.name}",
+                    connect=False,
+                    original_name=world.name,
+                    show_save=False,
+                    lock_name=True,
+                )
+                continue
+            return
 
     def _on_close_tab(self, _event: wx.CommandEvent) -> None:
         index = self.book.GetSelection()
@@ -2055,9 +2249,8 @@ class GenericMudFrame(wx.Frame):
             except (OSError, ValueError, PackError) as error:
                 self.announce(f"Import failed: {error}")
             else:
-                worlds = [w for w in load_worlds() if w.name != world.name] + [world]
-                save_worlds(worlds)
-                self.announce(f"Imported {world.name}. It's in the Connect dialog now.")
+                if self._save_world(world):
+                    self.announce(f"Imported {world.name}. It's in the saved-world list now.")
         dialog.Destroy()
 
     def _on_disconnect(self, _event: wx.CommandEvent) -> None:
@@ -2316,7 +2509,7 @@ class GenericMudFrame(wx.Frame):
     def _finish_setup(self, result) -> None:
         """Create the pack's world and confirm the connection; only open the full form if
         details are missing. A complete world (from the pack or the known-MUD table) is saved
-        and bound, then the Connect dialog confirms before connecting -- prefilled, so the common
+        and bound, then the world dialog confirms before connecting -- prefilled, so the common
         case is a single Enter, but the user is still asked rather than dropped into a session."""
         world = result.world
         if world is not None and world.host and world.port and self._pack_bundles_sounds(result):
@@ -2329,7 +2522,7 @@ class GenericMudFrame(wx.Frame):
         self._finish_setup_via_dialog(result)
 
     def _confirm_and_connect(self, world: World, manifest) -> None:
-        """Save the pack's world, then confirm the connection in the Connect dialog instead of
+        """Save the pack's world, then confirm the connection in the world dialog instead of
         connecting unprompted. A code-executing pack (MUSHclient, e.g. Erion) is offered trust in
         the same dialog: it stays silent until trusted, so without this it installs and connects
         but plays nothing. The world is persisted first, so cancelling still leaves it ready under
@@ -2337,9 +2530,13 @@ class GenericMudFrame(wx.Frame):
         needs_trust = (
             manifest.dialect in CODE_EXEC_DIALECTS and not self._packs.is_trusted(manifest.id)
         )
-        save_worlds([w for w in load_worlds() if w.name != world.name] + [world])
-        dialog = ConnectDialog(
-            self, load_worlds(), initial=world, offer_trust=needs_trust, save_default=True
+        self._save_world(world)
+        dialog = WorldDialog(
+            self,
+            initial=world,
+            title="Confirm World",
+            offer_trust=needs_trust,
+            show_save=False,
         )
         try:
             if dialog.ShowModal() != wx.ID_OK:
@@ -2350,8 +2547,7 @@ class GenericMudFrame(wx.Frame):
             if dialog.should_trust():
                 self._packs.trust(manifest.id)  # consent to run its scripts, so its sounds load
             chosen = dialog.get_world()
-            if dialog.should_save():
-                save_worlds([w for w in load_worlds() if w.name != chosen.name] + [chosen])
+            self._save_world(chosen, replacing=world.name)
             self.open_session(chosen)
         finally:
             dialog.Destroy()
@@ -2359,7 +2555,7 @@ class GenericMudFrame(wx.Frame):
     def _pack_bundles_sounds(self, result) -> bool:
         """True if the installed pack carries its own audio. A pack with none (Cosmic Rage
         streams cues, keeping sounds in a separate download) needs the world's Sounds folder
-        pointed at a local copy first, so it routes through the Connect dialog instead."""
+        pointed at a local copy first, so it routes through the world-details dialog instead."""
         try:
             pack_dir = self._packs.pack_dir(result.manifest.id)
         except Exception:  # noqa: BLE001 - if we can't tell, fall through to the dialog (safe)
@@ -2368,7 +2564,7 @@ class GenericMudFrame(wx.Frame):
 
     def _finish_setup_via_dialog(self, result) -> None:
         """Fallback when the pack has no connection details and the MUD isn't in the known-MUD
-        table: open the Connect form with the world name prefilled, explaining what's needed."""
+        table: open the world form with the name prefilled, explaining what's needed."""
         if result.world is not None and not result.world.host:
             self.announce(
                 f"The {result.world.name} soundpack installed, but carries no connection "
@@ -2383,17 +2579,22 @@ class GenericMudFrame(wx.Frame):
             result.manifest.dialect in CODE_EXEC_DIALECTS
             and not self._packs.is_trusted(result.manifest.id)
         )
-        connect = ConnectDialog(self, load_worlds(), initial=result.world, offer_trust=needs_trust)
+        connect = WorldDialog(
+            self,
+            initial=result.world,
+            title="Finish World Setup",
+            offer_trust=needs_trust,
+            save_default=True,
+        )
         if connect.ShowModal() == wx.ID_OK:
             world = connect.get_world()
-            if world.host:
-                worlds = [w for w in load_worlds() if w.name != world.name] + [world]
-                save_worlds(worlds)
-                self._packs.enable(result.manifest.id, world.name)  # (re)bind to final name
-                if connect.should_trust():
-                    self._packs.trust(result.manifest.id)
-                self.announce(f"Connecting to {world.name}.")
-                self.open_session(world)
+            if connect.should_save():
+                self._save_world(world)
+            self._packs.enable(result.manifest.id, world.name)  # (re)bind to final name
+            if connect.should_trust():
+                self._packs.trust(result.manifest.id)
+            self.announce(f"Connecting to {world.name}.")
+            self.open_session(world)
         connect.Destroy()
 
     def _on_toggle_self_voice(self, _event: wx.CommandEvent) -> None:

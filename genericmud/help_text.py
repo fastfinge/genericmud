@@ -13,9 +13,9 @@ GETTING_STARTED = """\
 Welcome to genericMud.
 
 Connecting:
-Press Ctrl+N, type a name, host, and port, and press Enter. Tick "Save this
-world" and next time it's in the list. A good first MUD is Aardwolf: host
-aardmud.org, port 4000.
+Press Ctrl+N, type a name, host, and port, and press Enter. "Save this world"
+is checked by default; next time press Ctrl+O and choose it from the saved
+world list. A good first MUD is Aardwolf: host aardmud.org, port 4000.
 
 Playing:
 Type commands in the command box and press Enter. Try: look, north (or just
@@ -24,14 +24,15 @@ Tab moves between the output box and the command box; typing while in the
 output box drops you back into the command box.
 
 More than one MUD:
-Ctrl+N opens another world in its own tab; Ctrl+Tab switches tabs. Only the
-tab you're on speaks — the others keep playing quietly, triggers and all.
+Ctrl+N opens another new world and Ctrl+O opens another saved world, each in
+its own tab. Ctrl+Tab switches tabs. Only the tab you're on speaks — the
+others keep playing quietly, triggers and all.
 
 Making it talk your way:
-Ctrl+F is follow mode: when you move rooms, speech skips straight to the new
-room. Ctrl+I makes every line interrupt (fast fights). View menu, Background
-silence keeps genericMud quiet while you're in another window. Esc silences
-the voice; Shift+F11 stops every sound.
+Ctrl+Shift+F is follow mode: when you move rooms, speech skips straight to the
+new room. Ctrl+I makes every line interrupt (fast fights). View menu,
+Background silence keeps genericMud quiet while you're in another window.
+Esc silences the voice; Shift+F11 stops every sound.
 
 Walking:
 The numpad is a compass: 8 north, 2 south, 4 west, 6 east, corners are the
@@ -57,7 +58,8 @@ Menus:
 Alt+F File.  Alt+R Rules.  Alt+V View.  Alt+H Help.
 
 Connection:
-Ctrl+N            Connect (new world or saved)
+Ctrl+N            Create and connect to a new world
+Ctrl+O            Connect to a saved world
 Ctrl+D            Disconnect this tab
 Ctrl+W            Close this tab
 Ctrl+Tab          Next session

@@ -33,6 +33,12 @@ def test_defaults_when_missing(tmp_path):
     assert prefs.skipped_version is None
 
 
+def test_defaults_when_file_is_corrupt(tmp_path):
+    path = tmp_path / "update-prefs.toml"
+    path.write_text("[update\nnot valid TOML", encoding="utf-8")
+    assert load_prefs(path) == UpdatePrefs()
+
+
 def test_is_snoozed():
     now = datetime(2026, 1, 1, tzinfo=UTC)
     soon = UpdatePrefs(snoozed_until=(now + timedelta(days=1)).isoformat())
@@ -42,6 +48,7 @@ def test_is_snoozed():
     assert is_snoozed(UpdatePrefs(), now) is False
     # A corrupt timestamp must never permanently suppress prompts.
     assert is_snoozed(UpdatePrefs(snoozed_until="garbage"), now) is False
+    assert is_snoozed(UpdatePrefs(snoozed_until="2030-01-01T00:00:00"), now) is False
 
 
 def test_snooze_timestamp():

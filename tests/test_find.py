@@ -44,12 +44,24 @@ def test_a_miss_is_reported_as_not_found_and_said_aloud():
     assert "not found: griffin" in backend.spoken
 
 
-def test_find_searches_backwards_by_default_and_forwards_when_asked():
-    app, _backend, posted = _app("old dragon", "middle", "new dragon")
-    app.on_ws_message(protocol.find("dragon"))  # from the newest line, going back
-    assert _results(posted)[-1]["text"] == "old dragon"
-    app.on_ws_message(protocol.find("dragon", forward=True))
-    assert _results(posted)[-1]["text"] == "new dragon"
+def test_new_find_includes_the_edge_line_in_the_chosen_direction():
+    backward, _backend, backward_posted = _app("old dragon", "middle", "new dragon")
+    backward.on_ws_message(protocol.find("dragon"))
+    assert _results(backward_posted)[-1]["text"] == "new dragon"
+
+    forward, _backend, forward_posted = _app("old dragon", "middle", "new dragon")
+    forward.on_ws_message(protocol.find("dragon", forward=True))
+    assert _results(forward_posted)[-1]["text"] == "old dragon"
+
+
+def test_find_works_when_the_only_line_contains_the_term():
+    app, _backend, posted = _app("a dragon roars")
+    app.on_ws_message(protocol.find("dragon"))
+    assert _results(posted)[-1] == {
+        "type": protocol.FIND_RESULT,
+        "text": "a dragon roars",
+        "found": True,
+    }
 
 
 def test_repeating_a_find_walks_through_the_matches():
@@ -58,6 +70,28 @@ def test_repeating_a_find_walks_through_the_matches():
         app.on_ws_message(protocol.find("dragon"))
     assert [m["text"] for m in _results(posted)] == [
         "third dragon", "second dragon", "first dragon",
+    ]
+
+
+def test_repeating_a_forward_find_advances_from_the_oldest_match():
+    app, _backend, posted = _app("first dragon", "middle", "third dragon")
+    app.on_ws_message(protocol.find("dragon", forward=True))
+    app.on_ws_message(protocol.find("dragon", forward=True))
+    assert [message["text"] for message in _results(posted)] == [
+        "first dragon",
+        "third dragon",
+    ]
+
+
+def test_reopening_find_restarts_from_the_direction_edge():
+    app, _backend, posted = _app("first dragon", "second dragon", "third dragon")
+    app.on_ws_message(protocol.find("dragon", restart=True))
+    app.on_ws_message(protocol.find("dragon"))
+    app.on_ws_message(protocol.find("dragon", restart=True))
+    assert [message["text"] for message in _results(posted)] == [
+        "third dragon",
+        "second dragon",
+        "third dragon",
     ]
 
 

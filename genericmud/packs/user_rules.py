@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from genericmud.automation.engine import MatchContext
+from genericmud.config.atomic import atomic_write_text
 from genericmud.scripting.api import ScriptApi
 
 SOURCE = "user"  # registration source: remove_source(SOURCE) clears rules for reload
@@ -129,8 +130,7 @@ def load_rules(pack_dir: Path) -> UserRules:
 
 def save_rules(pack_dir: Path, rules: UserRules) -> None:
     pack_dir = Path(pack_dir)
-    pack_dir.mkdir(parents=True, exist_ok=True)
-    rules_path(pack_dir).write_text(rules.to_json(), encoding="utf-8")
+    atomic_write_text(rules_path(pack_dir), rules.to_json())
 
 
 def copy_sound_into_pack(pack_dir: Path, source_path: str) -> str:

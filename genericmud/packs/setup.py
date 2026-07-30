@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from genericmud.config.atomic import atomic_write_text
 from genericmud.config.worlds import World
 from genericmud.packs import manifest_sync, vault
 from genericmud.packs.git_sources import GitSource
@@ -264,7 +265,7 @@ def _write_pack_toml(pack_dir: Path, source: ManifestSource) -> None:
         f"entry = {_toml_str(source.entry)}",
         f"origin = {_toml_str(source.manifest_url)}",
     ]
-    (Path(pack_dir) / "pack.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(Path(pack_dir) / "pack.toml", "\n".join(lines) + "\n")
 
 
 def _toml_str(value: str) -> str:

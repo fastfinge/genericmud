@@ -40,6 +40,31 @@ def test_find_forward_starts_past_the_caret():
     assert find_offset(TEXT, "dragon", 0, forward=True, case_sensitive=False) == FIRST
 
 
+def test_new_find_includes_the_direction_edge():
+    assert (
+        find_offset(
+            TEXT,
+            "dragon",
+            MIDDLE,
+            forward=True,
+            case_sensitive=False,
+            from_edge=True,
+        )
+        == FIRST
+    )
+    assert (
+        find_offset(
+            TEXT,
+            "dragon",
+            MIDDLE,
+            forward=False,
+            case_sensitive=False,
+            from_edge=True,
+        )
+        == LAST
+    )
+
+
 def test_repeating_a_forward_find_walks_to_the_next_match():
     # Sitting on a match and searching again must move on, not sit still.
     second = find_offset(TEXT, "dragon", FIRST, forward=True, case_sensitive=False)

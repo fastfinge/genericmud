@@ -80,3 +80,15 @@ def test_import_keeps_only_the_known_shapes(tmp_path):
     assert (target / "rules.json").is_file()
     assert (target / "sounds" / "ping.wav").is_file()
     assert not (target / "stray.exe").exists()
+
+
+def test_import_replaces_an_invalid_port_and_does_not_coerce_tls_strings(tmp_path):
+    shared = tmp_path / "bad-fields.zip"
+    with zipfile.ZipFile(shared, "w") as archive:
+        archive.writestr(
+            "world.json",
+            json.dumps({"name": "Imported", "host": "mud.example", "port": 70000, "tls": "false"}),
+        )
+    world = import_world(shared, tmp_path / "userpacks")
+    assert world.port == 23
+    assert world.tls is False

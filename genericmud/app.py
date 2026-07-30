@@ -21,19 +21,19 @@ from genericmud.automation.channels import ChannelPolicy
 from genericmud.automation.engine import AutomationEngine, Callback, EngineSink, MatchContext
 from genericmud.bridge import protocol
 from genericmud.completion import OutputWordIndex
+from genericmud.config.atomic import atomic_write_text
 from genericmud.config.worlds import config_dir
 from genericmud.model.buffer import Buffer, Line
 from genericmud.navigation import Navigator, SafeWalk, expand_speedwalk
-from genericmud.packs import ActivationResult, PackStore, activate_world
-from genericmud.packs import user_rules
+from genericmud.packs import ActivationResult, PackStore, activate_world, user_rules
 from genericmud.protocol import telnet as T
 from genericmud.protocol.msp import parse_msp_line
 from genericmud.protocol.oob import OobMessage, ServerStatus, from_subnegotiation
 from genericmud.render.ansi import parse_ansi
 from genericmud.review.channels import ChannelReview
 from genericmud.review.cursor import ReviewCursor
-from genericmud.scripting.api import ScriptApi
 from genericmud.safepath import is_unsafe, sanitize_component
+from genericmud.scripting.api import ScriptApi
 from genericmud.scripting.mushclient_compat import MushclientPack
 from genericmud.session.credentials import CredentialStore
 from genericmud.session.hub import SessionHub
@@ -372,7 +372,7 @@ class EngineApp:
         self.engine.cancel_timers()  # cancel pending pack timers so none fire post-close
         self._persist_pack_vars()
         if self.hub is not None and self.name:
-            self.hub.unregister(self.name)
+            self.hub.unregister(self.name, self._dispatch_remote)
         if self.logger is not None:
             self.logger.stop()
             self.logger = None
@@ -449,8 +449,7 @@ class EngineApp:
         # persisting it would pin a moved/reinstalled pack to its old location.
         data = {k: v for k, v in self.engine.all_vars().items() if k != "sppath"}
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+            atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True))
         except OSError:
             pass  # a state write must never break session close
 
@@ -698,12 +697,19 @@ class EngineApp:
         FIND_RESULT so the renderer can put its own caret on the same line where it can.
         """
         term = message.get("term", "")
-        if not self.review.active:
-            self.review.enter()  # a fresh search starts from the newest line
+        forward = bool(message.get("forward", False))
+        restart = bool(message.get("restart", False)) or not self.review.active
+        if restart:
+            # A new Find starts at the chosen edge and includes that edge line. Repeats
+            # remain exclusive, so F3 advances instead of finding the same line forever.
+            self.review.enter()
+            if forward:
+                self.review.top()
         hit = self.review.search(
             term,
-            forward=bool(message.get("forward", False)),
+            forward=forward,
             case_sensitive=bool(message.get("case_sensitive", False)),
+            include_current=restart,
         )
         self._post(protocol.find_result(hit, found=bool(hit)))
         self._speak_review(hit or f"not found: {term}")

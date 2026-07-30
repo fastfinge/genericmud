@@ -76,6 +76,14 @@ def test_repeating_a_search_walks_past_the_current_line():
     assert cursor.search("dragon") == ""  # no wrap: running off the end is a miss
 
 
+def test_first_search_can_include_the_current_edge_line():
+    cursor = ReviewCursor(_buffer("one dragon", "two"))
+    cursor.top()
+    assert cursor.search("dragon", forward=True, include_current=True) == "one dragon"
+    cursor.bottom()
+    assert cursor.search("two", include_current=True) == "two"
+
+
 def test_search_is_case_insensitive_by_default():
     cursor = ReviewCursor(_buffer("alpha", "beta Dragon", "gamma"))
     cursor.enter()

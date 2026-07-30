@@ -10,12 +10,11 @@ caller changes.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import tempfile
 from pathlib import Path
 from typing import Protocol
+
+from genericmud.config.atomic import atomic_write_text
 
 
 class CredentialStore(Protocol):
@@ -34,9 +33,13 @@ class PlaintextCredentialStore:
 
     def get(self, world: str) -> tuple[str, str] | None:
         entry = self._load().get(world)
-        if not entry:
+        if not isinstance(entry, dict):
             return None
-        return entry.get("username", ""), entry.get("password", "")
+        username = entry.get("username")
+        password = entry.get("password")
+        if not isinstance(username, str) or not isinstance(password, str):
+            return None
+        return username, password
 
     def set(self, world: str, username: str, password: str) -> None:
         data = self._load()
@@ -61,16 +64,6 @@ class PlaintextCredentialStore:
         return data if isinstance(data, dict) else {}
 
     def _save(self, data: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        # mkstemp creates the temp readable/writable only by this user (0600 on POSIX), and the
-        # atomic replace means the plaintext passwords file is never world-readable and never
-        # left half-written. (The old direct write inherited the umask -- 0644 on most *nix.)
-        fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=".cred-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, sort_keys=True)
-            os.replace(tmp, self._path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        # The atomic helper's mkstemp file is owner-only on POSIX, so plaintext
+        # credentials stay private as well as protected from partial writes.
+        atomic_write_text(self._path, json.dumps(data, indent=2, sort_keys=True))

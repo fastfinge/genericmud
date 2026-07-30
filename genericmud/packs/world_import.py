@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from genericmud.config.worlds import World
+from genericmud.config.worlds import World, parse_port
 
 _WORLD_TAG_RE = re.compile(r"<world\b(.*?)>", re.DOTALL | re.IGNORECASE)
 _WORLD_FILE_SUFFIXES = (".mcl", ".xml")
@@ -34,9 +34,13 @@ def _world_from_text(text: str) -> World | None:
         return None  # a plugin/trigger .xml or a .set pack: no <world> element
     attrs = tag.group(1)
     site, port = _attr(attrs, "site"), _attr(attrs, "port")
-    if not site or not port or not port.isdigit():
+    if not site or not port:
         return None
-    return World(name=_attr(attrs, "name") or site, host=site, port=int(port))
+    try:
+        parsed_port = parse_port(port)
+    except ValueError:
+        return None
+    return World(name=_attr(attrs, "name") or site, host=site, port=parsed_port)
 
 
 def world_from_pack(path: str | Path) -> World | None:

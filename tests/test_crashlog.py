@@ -70,7 +70,8 @@ def test_record_swallows_a_write_fault(tmp_path):
 
 def test_install_returns_none_and_leaves_hooks_when_logs_dir_unwritable(tmp_path, monkeypatch):
     blocker = tmp_path / "cfg"
-    blocker.write_text("not a dir", encoding="utf-8")  # config_dir/"logs" mkdir -> NotADirectoryError
+    # config_dir/"logs" mkdir -> NotADirectoryError
+    blocker.write_text("not a dir", encoding="utf-8")
     monkeypatch.setattr(crashlog, "_ACTIVE", None)
     monkeypatch.setattr("genericmud.config.worlds.config_dir", lambda: blocker)
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)  # auto-restored by monkeypatch

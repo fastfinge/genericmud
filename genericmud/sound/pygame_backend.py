@@ -59,7 +59,8 @@ class PygameSoundBackend:
         self._sounds: OrderedDict[str, object] = OrderedDict()  # path -> Sound (bounded LRU cache)
         self._channels: dict[str, object] = {}  # category -> Channel (only entries still live)
         self._indices: dict[str, int] = {}  # category -> physical mixer channel index
-        self._loops: dict[str, bool] = {}  # category -> is it a looping cue (protected from eviction)
+        # category -> whether this is a looping cue protected from eviction
+        self._loops: dict[str, bool] = {}
         self._levels: dict[str, tuple[float, float]] = {}  # category -> (gain, pan) for adjust()
         self._warned: set[str] = set()  # paths already reported, so a missing cue warns once
         self._music_channel: str | None = None  # logical channel the streaming music cue is on

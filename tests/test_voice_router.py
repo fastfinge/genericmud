@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+
+from genericmud.voice.factory import PrintBackend
 from genericmud.voice.router import VoiceRouter
 from tests.helpers import RecordingBackend
 
@@ -89,3 +92,8 @@ def test_interrupt_stops_speech_but_keeps_the_suppressed_backlog():
     clock[0] = 10.0
     router.speak("after")
     assert "1 more line" in backend.spoken  # the backlog notice survived the interrupt
+
+
+def test_print_fallback_is_safe_without_a_console(monkeypatch):
+    monkeypatch.setattr(sys, "stdout", None)
+    PrintBackend().speak("windowed build has no stdout")

@@ -3,12 +3,27 @@
 // modified combos and function keys are forwarded to the engine, which owns the
 // keymap (recall, review, flush, user macros).
 
+const PASSTHROUGH_COMBOS = new Set([
+  "alt+f4",
+  "ctrl+c", "ctrl+v", "ctrl+x", "ctrl+a", "ctrl+z", "ctrl+y", "ctrl+f",
+  "ctrl+left", "ctrl+right", "ctrl+home", "ctrl+end", "ctrl+delete",
+  "ctrl+shift+left", "ctrl+shift+right", "ctrl+shift+home", "ctrl+shift+end",
+  "f3", "shift+f3",
+]);
+const COMPLETE_FORWARD = "ctrl+space";
+const COMPLETE_BACKWARD = "ctrl+shift+space";
+const MAX_COMPLETION_WORDS = 500;
+const MIN_COMPLETION_WORD_LENGTH = 3;
+const OUTPUT_WORD = /[A-Za-z][A-Za-z'-]+/g;
+
 export class Input {
   constructor(element, bridge) {
     this.element = element;
     this.bridge = bridge;
     this.history = [];
     this.historyIndex = 0;
+    this.words = [];
+    this.completion = null;
     element.closest("form").addEventListener("submit", (e) => {
       e.preventDefault();
       this._submit();
@@ -21,23 +36,42 @@ export class Input {
     this.bridge.send({ type: "input", text });
     if (text) this.history.push(text);
     this.historyIndex = this.history.length;
+    this.completion = null;
     this.element.value = "";
+  }
+
+  addOutput(text) {
+    for (const word of String(text).match(OUTPUT_WORD) ?? []) {
+      if (word.length < MIN_COMPLETION_WORD_LENGTH) continue;
+      const key = word.toLowerCase();
+      this.words = this.words.filter((candidate) => candidate.toLowerCase() !== key);
+      this.words.unshift(word);
+    }
+    this.words.length = Math.min(this.words.length, MAX_COMPLETION_WORDS);
   }
 
   _onKey(event) {
     const key = event.key;
-    if (key === "Enter") return; // handled on submit
     const isFunctionKey = /^F\d{1,2}$/.test(key);
     const hasCommandModifier = event.ctrlKey || event.altKey || event.metaKey;
+    if (event.getModifierState?.("AltGraph")) return;
+    const combo = this._combo(event);
+    if (combo === COMPLETE_FORWARD || combo === COMPLETE_BACKWARD) {
+      event.preventDefault();
+      this._complete(combo === COMPLETE_BACKWARD);
+      return;
+    }
+    this.completion = null;
+    if (key === "Enter" && !hasCommandModifier) return; // handled on submit
+    if (event.metaKey) return; // preserve Command+C/V/A/Q and other platform shortcuts
 
-    if (!hasCommandModifier && !isFunctionKey) {
+    if (!hasCommandModifier && !isFunctionKey && key !== "Escape") {
       if (key === "ArrowUp") { event.preventDefault(); this._recallHistory(-1); }
       else if (key === "ArrowDown") { event.preventDefault(); this._recallHistory(1); }
       return; // ordinary typing
     }
 
-    const combo = this._combo(event);
-    if (combo === "alt+f4") return; // let the platform close the window
+    if (PASSTHROUGH_COMBOS.has(combo)) return;
     if (combo) {
       event.preventDefault();
       this.bridge.send({ type: "key", key: combo });
@@ -50,6 +84,42 @@ export class Input {
     this.element.value = this.history[this.historyIndex] ?? "";
   }
 
+  _complete(backward) {
+    if (!this.completion) {
+      const value = this.element.value;
+      const caret = this.element.selectionStart ?? value.length;
+      const head = value.slice(0, caret);
+      const start = Math.max(head.lastIndexOf(" "), head.lastIndexOf(";")) + 1;
+      const prefix = head.slice(start);
+      if (!prefix) return;
+      const needle = prefix.toLowerCase();
+      const candidates = this.words.filter((word) => {
+        const candidate = word.toLowerCase();
+        return candidate.startsWith(needle) && candidate !== needle;
+      });
+      if (!candidates.length) return;
+      this.completion = {
+        before: value.slice(0, start),
+        tail: value.slice(caret),
+        candidates,
+        index: -1,
+      };
+    }
+
+    const state = this.completion;
+    if (backward) {
+      state.index = state.index === -1
+        ? state.candidates.length - 1
+        : (state.index - 1 + state.candidates.length) % state.candidates.length;
+    } else {
+      state.index = (state.index + 1) % state.candidates.length;
+    }
+    const word = state.candidates[state.index];
+    this.element.value = state.before + word + state.tail;
+    const caret = state.before.length + word.length;
+    this.element.setSelectionRange(caret, caret);
+  }
+
   _combo(event) {
     const key = event.key.toLowerCase();
     if (["control", "alt", "shift", "meta"].includes(key)) return null;
@@ -57,7 +127,9 @@ export class Input {
     if (event.ctrlKey) parts.push("ctrl");
     if (event.altKey) parts.push("alt");
     if (event.shiftKey) parts.push("shift");
-    const named = { arrowup: "up", arrowdown: "down", arrowleft: "left", arrowright: "right" };
+    const named = {
+      arrowup: "up", arrowdown: "down", arrowleft: "left", arrowright: "right", " ": "space",
+    };
     parts.push(named[key] ?? key);
     return parts.join("+");
   }

@@ -323,7 +323,8 @@ def test_sppath_fallback_finds_a_sound_the_world_anchored_path_misses(tmp_path):
         "</triggers></muclient>",
         encoding="latin-1",
     )
-    real_sound = tmp_path / "MUSHclient" / "sounds" / "boom.wav"  # a separate tree, not beside the world
+    # A separate tree, not beside the world file.
+    real_sound = tmp_path / "MUSHclient" / "sounds" / "boom.wav"
     real_sound.parent.mkdir(parents=True)
     real_sound.write_bytes(b"RIFF")
     sink = RecordingSink()

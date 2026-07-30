@@ -22,7 +22,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from genericmud.config.worlds import World
+from genericmud.config.worlds import World, parse_port
 from genericmud.packs.store import extract_pack
 from genericmud.packs.user_rules import RULES_FILENAME, SOUNDS_DIRNAME
 from genericmud.safepath import sanitize_component
@@ -92,10 +92,10 @@ def import_world(zip_path: Path, userpacks_root: Path) -> World:
                     shutil.copy2(path, dest)
 
     try:
-        port = int(meta.get("port") or 0)
-    except (TypeError, ValueError):
-        port = 0
-    return World(name=name, host=host, port=port or 23, tls=bool(meta.get("tls")))
+        port = parse_port(meta.get("port") or 23)
+    except ValueError:
+        port = 23
+    return World(name=name, host=host, port=port, tls=meta.get("tls") is True)
 
 
 def _unique_pack_dir(root: Path, name: str) -> tuple[Path, str]:

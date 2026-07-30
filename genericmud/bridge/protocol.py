@@ -69,9 +69,21 @@ def review(text: str) -> dict[str, Any]:
     return {"type": REVIEW, "text": text}
 
 
-def find(term: str, *, forward: bool = False, case_sensitive: bool = False) -> dict[str, Any]:
+def find(
+    term: str,
+    *,
+    forward: bool = False,
+    case_sensitive: bool = False,
+    restart: bool = False,
+) -> dict[str, Any]:
     """Ask the engine to search the scrollback. Backwards by default: it is history."""
-    return {"type": FIND, "term": term, "forward": forward, "case_sensitive": case_sensitive}
+    return {
+        "type": FIND,
+        "term": term,
+        "forward": forward,
+        "case_sensitive": case_sensitive,
+        "restart": restart,
+    }
 
 
 def find_result(text: str, *, found: bool) -> dict[str, Any]:

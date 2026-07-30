@@ -52,3 +52,9 @@ def test_plugin_xml_without_world_element_returns_none(tmp_path):
     path = tmp_path / "plugin.xml"
     path.write_text("<muclient><plugin name='x'></plugin></muclient>", encoding="utf-8")
     assert world_from_pack(path) is None
+
+
+def test_world_file_with_out_of_range_port_returns_none(tmp_path):
+    path = tmp_path / "bad.MCL"
+    path.write_text('<muclient><world name="Bad" site="bad.example" port="70000"></world>')
+    assert world_from_pack(path) is None

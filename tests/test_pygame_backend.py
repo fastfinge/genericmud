@@ -22,7 +22,8 @@ class _FakeChannel:
         self.played: list[tuple] = []
         self.volume: tuple | None = None
         self.stopped = 0
-        self.busy = True  # mirrors pygame.Channel.get_busy; tests flip it to simulate a finished cue
+        # Mirrors pygame.Channel.get_busy; tests flip it to simulate a finished cue.
+        self.busy = True
 
     def play(self, sound, loops):
         self.played.append((sound, loops))

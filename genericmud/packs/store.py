@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace  # 'replace' the kwarg shadows it here
 from pathlib import Path
 
+from genericmud.config.atomic import atomic_write_text
 from genericmud.packs.manifest import CODE_EXEC_DIALECTS, PackManifest, load_manifest, slugify
 
 
@@ -108,24 +109,41 @@ class PackStore:
         # the user trusted the bytes they saw, not whatever an on-path attacker now serves. Drop
         # trust so it must be re-granted before the new code auto-runs (see _revoke_stale_trust).
         revoke_trust = self._replace_invalidates_trust(manifest, replace=replace)
+        if revoke_trust:
+            # Revoke before replacing bytes. A crash or locked trust file must never leave
+            # newly-downloaded cleartext code covered by the old content's trust grant.
+            self.untrust(manifest.id)
 
         dest = self.packs_dir / manifest.id
         src, dst = source.resolve(), dest.resolve()
         if src == dst or dst in src.parents or src in dst.parents:
             raise PackError(f"refusing to install {manifest.id!r}: source and destination overlap")
-        if dest.exists():
-            shutil.rmtree(dest)
-        if source.is_file():
-            dest.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, dest / manifest.entry)
-        else:
-            self.packs_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(source, dest)
+        self.packs_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=self.packs_dir, prefix=f".{manifest.id}-install-"
+        ) as temporary:
+            staging = Path(temporary) / "new"
+            previous = Path(temporary) / "previous"
+            if source.is_file():
+                staging.mkdir()
+                shutil.copy2(source, staging / manifest.entry)
+            else:
+                shutil.copytree(source, staging)
 
-        index[manifest.id] = manifest.to_dict()
-        self._save_index(index)
-        if revoke_trust:
-            self.untrust(manifest.id)
+            if dest.exists():
+                os.replace(dest, previous)
+            installed_new = False
+            try:
+                os.replace(staging, dest)
+                installed_new = True
+                index[manifest.id] = manifest.to_dict()
+                self._save_index(index)
+            except BaseException:
+                if installed_new and dest.exists():
+                    shutil.rmtree(dest)
+                if previous.exists():
+                    os.replace(previous, dest)
+                raise
         if world:
             self.enable(manifest.id, world)
         if trust:  # an explicit re-vouch (e.g. CLI --trust) still wins over the revoke above
@@ -254,19 +272,36 @@ class PackStore:
     # --- json state ---
 
     def _load_index(self) -> dict:
-        return _load_json(self._index_path)
+        valid: dict[str, dict] = {}
+        for pack_id, data in _load_json(self._index_path).items():
+            if not isinstance(pack_id, str) or not isinstance(data, dict):
+                continue
+            try:
+                manifest = PackManifest.from_dict(data)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if manifest.id == pack_id:
+                valid[pack_id] = data
+        return valid
 
     def _save_index(self, data: dict) -> None:
         _save_json(self._index_path, data)
 
     def _load_worlds(self) -> dict:
-        return _load_json(self._worlds_path)
+        return {
+            world: [pack_id for pack_id in pack_ids if isinstance(pack_id, str)]
+            for world, pack_ids in _load_json(self._worlds_path).items()
+            if isinstance(world, str) and isinstance(pack_ids, list)
+        }
 
     def _save_worlds(self, data: dict) -> None:
         _save_json(self._worlds_path, data)
 
     def _load_trust(self) -> set[str]:
-        return set(_load_json(self._trust_path).get("trusted", []))
+        trusted = _load_json(self._trust_path).get("trusted", [])
+        if not isinstance(trusted, list):
+            return set()
+        return {pack_id for pack_id in trusted if isinstance(pack_id, str)}
 
     def _save_trust(self, trusted: set[str]) -> None:
         _save_json(self._trust_path, {"trusted": sorted(trusted)})
@@ -377,19 +412,13 @@ def _is_cleartext_origin(origin: str | None) -> bool:
 
 
 def _load_json(path: Path) -> dict:
-    if not path.is_file():
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
         return {}
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
+    return data if isinstance(data, dict) else {}
 
 
 def _save_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Write to a temp file and atomically replace, so a crash mid-write can't leave a torn or
-    # empty index/worlds/trust file (which would lose every installed pack's state).
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2, sort_keys=True)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True))

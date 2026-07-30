@@ -21,9 +21,13 @@ const output = new Output(outputEl);
 const audio = new Audio((e) =>
   bridge.send({ type: "client_error", scope: "audio", file: e.file, error: e.error }));
 const status = new Status(statusEl);
+let input;
 
 const handlers = {
-  line: (m) => output.addLine(m),
+  line: (m) => {
+    output.addLine(m);
+    input.addOutput(m.text);
+  },
   echo: (m) => output.addLine({ text: m.text }),
   sound: (m) => audio.play(m),
   stop_sound: (m) => audio.stop(m.channel),
@@ -35,7 +39,7 @@ const handlers = {
 };
 
 const bridge = new Bridge(port, handlers);
-new Input(inputEl, bridge);
+input = new Input(inputEl, bridge);
 inputEl.focus();
 
 // Browser autoplay policy: the audio context starts suspended until a gesture.

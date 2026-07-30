@@ -21,10 +21,12 @@ or the "For developers" section below.
 
 ## Connecting to a MUD
 
-1. Press **Ctrl+N** (or Alt+F, then Connect).
+1. Press **Ctrl+N** (or Alt+F, then New World).
 2. Type a name, host, and port — for example Aardwolf: host `aardmud.org`,
-   port `4000`. Tick "Save this world" so it's in the list next time.
+   port `4000`. "Save this world" is checked by default.
 3. Press Enter.
+
+Next time, press **Ctrl+O** to choose the world from the saved-world list.
 
 Type commands in the command box and press Enter to send them. `look`,
 `north` (or just `n`), `say hello`, and `help` are good first commands on
@@ -36,14 +38,14 @@ land back in the command box automatically.
 
 ## More than one MUD at once
 
-**Ctrl+N** again opens a second world in its own tab. **Ctrl+Tab** and
-**Ctrl+Shift+Tab** switch between them. Only the tab you're on speaks; the
-others stay quiet but keep playing — triggers still fire and sounds still
-play, so you miss nothing.
+**Ctrl+N** opens another new world and **Ctrl+O** opens another saved world,
+each in its own tab. **Ctrl+Tab** and **Ctrl+Shift+Tab** switch between them.
+Only the tab you're on speaks; the others stay quiet but keep playing —
+triggers still fire and sounds still play, so you miss nothing.
 
 ## Making it talk the way you want
 
-- **Ctrl+F — follow mode.** When you move to a new room, speech cuts straight
+- **Ctrl+Shift+F — follow mode.** When you move to a new room, speech cuts straight
   to the new room instead of finishing the old one. Chat and combat still
   queue up. This is the one to try first if the voice always feels behind.
 - **Ctrl+I — interrupt mode.** Every new line barges in. For fast fights.
@@ -119,7 +121,8 @@ Menus: **Alt+F** File, **Alt+R** Rules, **Alt+V** View, **Alt+H** Help.
 
 | Keys | What they do |
 | --- | --- |
-| Ctrl+N | Connect (new world or saved) |
+| Ctrl+N | Create and connect to a new world |
+| Ctrl+O | Connect to a saved world |
 | Ctrl+D | Disconnect this tab |
 | Ctrl+W | Close this tab |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous session |
@@ -130,7 +133,7 @@ Menus: **Alt+F** File, **Alt+R** Rules, **Alt+V** View, **Alt+H** Help.
 | Ctrl+Space / Ctrl+Shift+Space | Complete the word you're typing from recent output |
 | Numpad | Compass walking (View menu toggle) |
 | Ctrl+M | Self-voice on/off |
-| Ctrl+F | Follow mode (speech interrupts on room movement) |
+| Ctrl+Shift+F | Follow mode (speech interrupts on room movement) |
 | Ctrl+I | Interrupt mode (every line barges in) |
 | Esc / F11 | Stop speech now |
 | Shift+F11 | Stop all sounds (panic) |

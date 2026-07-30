@@ -103,6 +103,38 @@ def test_reinstall_requires_replace(tmp_path):
     assert len(store.installed()) == 1
 
 
+def test_failed_replacement_copy_preserves_the_installed_pack(tmp_path, monkeypatch):
+    store = PackStore(tmp_path / "store")
+    src = _bare_pack(tmp_path, "hunting.lua", 'mud.send("old")')
+    store.install(src)
+    src.write_text('mud.send("new")', encoding="utf-8")
+
+    def fail_copy(_source, _destination):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("genericmud.packs.store.shutil.copy2", fail_copy)
+    with pytest.raises(OSError, match="disk full"):
+        store.install(src, replace=True)
+
+    assert store.entry_path("hunting").read_text(encoding="utf-8") == 'mud.send("old")'
+
+
+def test_failed_replacement_index_write_rolls_back_content(tmp_path, monkeypatch):
+    store = PackStore(tmp_path / "store")
+    src = _bare_pack(tmp_path, "hunting.lua", 'mud.send("old")')
+    store.install(src)
+    src.write_text('mud.send("new")', encoding="utf-8")
+
+    def fail_index(_data):
+        raise OSError("index locked")
+
+    monkeypatch.setattr(store, "_save_index", fail_index)
+    with pytest.raises(OSError, match="index locked"):
+        store.install(src, replace=True)
+
+    assert store.entry_path("hunting").read_text(encoding="utf-8") == 'mud.send("old")'
+
+
 def test_enable_disable_is_per_world(tmp_path):
     store = PackStore(tmp_path / "store")
     store.install(_bare_pack(tmp_path, "hunting.lua"))
@@ -185,6 +217,50 @@ def test_state_persists_across_store_instances(tmp_path):
     assert "hunting" in json.loads((root / "index.json").read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("filename", ("index.json", "worlds.json", "trust.json"))
+def test_corrupt_store_state_degrades_to_empty_instead_of_crashing(tmp_path, filename):
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / filename).write_text("{not valid json", encoding="utf-8")
+    store = PackStore(root)
+
+    assert store.installed() == []
+    assert store.enabled("mud") == []
+    assert store.is_trusted("pack") is False
+
+
+def test_malformed_store_rows_are_ignored_without_losing_valid_rows(tmp_path):
+    root = tmp_path / "store"
+    store = PackStore(root)
+    store.install(_bare_pack(tmp_path, "hunting.lua"))
+    (root / "index.json").write_text(
+        json.dumps(
+            {
+                "hunting": store.manifest("hunting").to_dict(),
+                "broken": 7,
+                "wrong-key": {
+                    **store.manifest("hunting").to_dict(),
+                    "id": "different-key",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "worlds.json").write_text(
+        json.dumps({"mud": ["hunting", 7], "broken": 7}),
+        encoding="utf-8",
+    )
+    (root / "trust.json").write_text(
+        json.dumps({"trusted": "hunting"}),
+        encoding="utf-8",
+    )
+
+    assert [manifest.id for manifest in store.installed()] == ["hunting"]
+    assert [manifest.id for manifest in store.enabled("mud")] == ["hunting"]
+    assert store.enabled("broken") == []
+    assert store.is_trusted("hunting") is False
+
+
 def test_install_is_untrusted_by_default(tmp_path):
     store = PackStore(tmp_path / "store")
     store.install(_bare_pack(tmp_path, "hunting.lua"))
@@ -236,6 +312,33 @@ def test_replacing_trusted_mushclient_over_http_drops_trust(tmp_path):
     store.trust(m.id)
     store.install(pack, entry="main.xml", replace=True, origin="http://packs.example/x.zip")
     assert not store.is_trusted(m.id)  # cleartext replace of code-exec content -> must re-vouch
+
+
+def test_failed_trust_revoke_does_not_replace_cleartext_code(tmp_path, monkeypatch):
+    store = PackStore(tmp_path / "store")
+    pack = _mush(tmp_path)
+    (pack / "main.xml").write_text("<muclient>old</muclient>", encoding="utf-8")
+    manifest = store.install(
+        pack,
+        entry="main.xml",
+        origin="http://packs.example/x.zip",
+        trust=True,
+    )
+    (pack / "main.xml").write_text("<muclient>new</muclient>", encoding="utf-8")
+
+    def fail_trust(_trusted):
+        raise OSError("trust locked")
+
+    monkeypatch.setattr(store, "_save_trust", fail_trust)
+    with pytest.raises(OSError, match="trust locked"):
+        store.install(
+            pack,
+            entry="main.xml",
+            replace=True,
+            origin="http://packs.example/x.zip",
+        )
+
+    assert store.entry_path(manifest.id).read_text(encoding="utf-8") == "<muclient>old</muclient>"
 
 
 def test_replacing_trusted_mushclient_over_https_keeps_trust(tmp_path):

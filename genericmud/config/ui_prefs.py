@@ -20,6 +20,7 @@ import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+from genericmud.config.atomic import atomic_write_text
 from genericmud.config.worlds import config_dir
 
 
@@ -42,10 +43,16 @@ def load_ui_prefs(path: Path | None = None) -> UiPrefs:
         data = tomllib.loads(target.read_text(encoding="utf-8")).get("ui", {})
     except (OSError, ValueError):
         return UiPrefs()  # missing or corrupt file: defaults, never a crash
+    if not isinstance(data, dict):
+        return UiPrefs()
     defaults = UiPrefs()
     return UiPrefs(
         **{
-            f.name: bool(data.get(f.name, getattr(defaults, f.name)))
+            f.name: (
+                data[f.name]
+                if isinstance(data.get(f.name), bool)
+                else getattr(defaults, f.name)
+            )
             for f in fields(UiPrefs)
         }
     )
@@ -53,9 +60,8 @@ def load_ui_prefs(path: Path | None = None) -> UiPrefs:
 
 def save_ui_prefs(prefs: UiPrefs, path: Path | None = None) -> None:
     target = path or prefs_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
     lines = ["[ui]"] + [
         f"{f.name} = {'true' if getattr(prefs, f.name) else 'false'}"
         for f in fields(UiPrefs)
     ]
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(target, "\n".join(lines) + "\n")

@@ -39,3 +39,9 @@ def test_shortcuts_page_mentions_every_keymap_namespace_key():
 def test_menu_access_keys_documented():
     for chunk in ("Alt+F File", "Alt+H Help"):
         assert chunk in help_text.KEYBOARD_SHORTCUTS
+
+
+def test_world_commands_and_follow_key_match_the_native_ui():
+    for shortcut in ("Ctrl+N", "Ctrl+O", "Ctrl+Shift+F"):
+        assert shortcut in help_text.KEYBOARD_SHORTCUTS
+    assert "Ctrl+Shift+F is follow mode" in help_text.GETTING_STARTED

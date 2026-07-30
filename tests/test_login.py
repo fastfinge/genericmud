@@ -21,6 +21,19 @@ def test_credential_store_roundtrip_and_persist(tmp_path):
     assert store.get("gw") is None
 
 
+def test_credential_store_ignores_malformed_rows(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text(
+        '{"number": 7, "missing": {"username": "hero"}, '
+        '"wrong": {"username": 1, "password": false}}',
+        encoding="utf-8",
+    )
+    store = PlaintextCredentialStore(path)
+    assert store.get("number") is None
+    assert store.get("missing") is None
+    assert store.get("wrong") is None
+
+
 def test_autologin_password_only_sent_after_username():
     sent: list[str] = []
     login = AutoLogin("hero", "secret", sent.append)

@@ -28,20 +28,29 @@ def anchor_after_append(anchor: int, removed: int, last_position: int) -> int:
 
 
 def find_offset(
-    text: str, needle: str, start: int, *, forward: bool, case_sensitive: bool
+    text: str,
+    needle: str,
+    start: int,
+    *,
+    forward: bool,
+    case_sensitive: bool,
+    from_edge: bool = False,
 ) -> int | None:
     """Offset of the next (or previous) ``needle`` in ``text``, or None for no match.
 
-    ``start`` is the caret. The search begins strictly past it in whichever direction is
-    asked for, so repeating a find walks through the matches rather than sticking on the
-    one already under the caret. Does not wrap, matching the scrollback search.
+    ``start`` is the caret. Repeated searches begin strictly past it so they advance.
+    ``from_edge`` is for a newly-submitted dialog search: it includes the first or last
+    visible line, matching the engine cursor's reset to that edge.
     """
     if not needle:
         return None
     haystack = text if case_sensitive else text.lower()
     target = needle if case_sensitive else needle.lower()
     caret = max(0, start)
-    found = haystack.find(target, caret + 1) if forward else haystack.rfind(target, 0, caret)
+    if from_edge:
+        found = haystack.find(target) if forward else haystack.rfind(target)
+    else:
+        found = haystack.find(target, caret + 1) if forward else haystack.rfind(target, 0, caret)
     return None if found < 0 else found
 
 

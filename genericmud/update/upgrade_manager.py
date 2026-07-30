@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from genericmud.config.atomic import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 # Layout of the per-install upgrade-state folder. It lives beside the exe and is NOT part
@@ -151,7 +153,7 @@ def prepare_for_upgrade(
         "expected_file_hashes_sha256": expected,
         "backed_up_files": backed_up,
     }
-    _pending_path(install_dir).write_text(json.dumps(pending, indent=2), encoding="utf-8")
+    atomic_write_text(_pending_path(install_dir), json.dumps(pending, indent=2))
     logger.info(
         "Prepared in-app upgrade to %s: backed up %d file(s), verifying %d.",
         target_version, len(backed_up), len(expected),

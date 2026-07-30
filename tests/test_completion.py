@@ -50,6 +50,13 @@ def test_cycler_wraps_forward_and_backward():
     assert cycler.prev() == "goblin"  # steps back
 
 
+def test_cycler_can_start_in_reverse():
+    cycler = CompletionCycler()
+    cycler.begin("g", ["gnome", "goblin", "goblin-king"])
+    assert cycler.prev() == "goblin-king"
+    assert cycler.prev() == "goblin"
+
+
 def test_cycler_reset_ends_the_run():
     cycler = CompletionCycler()
     cycler.begin("g", ["gnome"])

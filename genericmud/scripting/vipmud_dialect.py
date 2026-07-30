@@ -54,9 +54,9 @@ _ASSIGN_RE = re.compile(r"^@(\w+)\s*=\s*(.*)$")
 _CONDITION_RE = re.compile(r"^(.*?)\s*(<=|>=|<>|!=|<|>|=)\s*(.*)$")
 # Fire-time %function(arg) calls the sound core needs: %var (indirect variable
 # read -- how a pack stops a cue whose handle it stored under a server-supplied
-# name) and %defined (guards those reads). Expanded after @vars, so %var(@id)
-# sees the substituted name.
-_FUNC_RE = re.compile(r"%(var|defined)\(([^()]*)\)", re.IGNORECASE)
+# name), %defined (guards those reads), and %ifword (dispatches Star Conquest's
+# communicator and other category-specific cues).
+_FUNC_RE = re.compile(r"%(var|defined|ifword)\(([^()]*)\)", re.IGNORECASE)
 # #math accepts plain arithmetic once variables are substituted; anything else
 # (names, quotes) is refused rather than guessed at. The character class allows `*`, hence `**`,
 # so exponentiation is rejected separately below -- `9**9**9` is regex-clean but a big-int CPU/
@@ -268,6 +268,98 @@ def _unquote(text: str) -> str:
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         return text[1:-1]
     return text
+
+
+def _split_function_args(text: str) -> list[str]:
+    """Split a VIPMud function's comma-separated arguments, preserving quoted commas."""
+    args: list[str] = []
+    start = 0
+    quote = ""
+    for i, char in enumerate(text):
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == ",":
+            args.append(text[start:i].strip())
+            start = i + 1
+    args.append(text[start:].strip())
+    return args
+
+
+def _strip_outer_parentheses(expression: str) -> str:
+    """Remove parentheses only when they enclose the complete expression."""
+    expression = expression.strip()
+    while len(expression) >= 2 and expression[0] == "(" and expression[-1] == ")":
+        depth = 0
+        quote = ""
+        encloses_all = True
+        for i, char in enumerate(expression):
+            if quote:
+                if char == quote:
+                    quote = ""
+                continue
+            if char in "\"'":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0 and i != len(expression) - 1:
+                    encloses_all = False
+                    break
+                if depth < 0:
+                    encloses_all = False
+                    break
+        if not encloses_all or depth != 0:
+            break
+        expression = expression[1:-1].strip()
+    return expression
+
+
+def _split_boolean(expression: str, operator: str) -> list[str]:
+    """Split a top-level ``and``/``or``, ignoring quoted text and parenthesized groups."""
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote = ""
+    lower = expression.lower()
+    i = 0
+    while i < len(expression):
+        char = expression[i]
+        if quote:
+            if char == quote:
+                quote = ""
+            i += 1
+            continue
+        if char in "\"'":
+            quote = char
+            i += 1
+            continue
+        if char == "(":
+            depth += 1
+            i += 1
+            continue
+        if char == ")":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        end = i + len(operator)
+        before_word = i > 0 and (expression[i - 1].isalnum() or expression[i - 1] == "_")
+        after_word = end < len(expression) and (
+            expression[end].isalnum() or expression[end] == "_"
+        )
+        if depth == 0 and lower[i:end] == operator and not before_word and not after_word:
+            parts.append(expression[start:i].strip())
+            start = end
+            i = end
+            continue
+        i += 1
+    if parts:
+        parts.append(expression[start:].strip())
+        return parts
+    return [expression]
 
 
 def _as_number(text: str) -> float | None:
@@ -621,9 +713,23 @@ class VipMudPack:
         self._api.set_var(self._subst(args[0].text, wildcards), result)
 
     def _eval_condition(self, condition: str, wildcards: list[str]) -> bool:
-        match = _CONDITION_RE.match(self._subst(condition, wildcards).strip())
+        return self._eval_expression(self._subst(condition, wildcards))
+
+    def _eval_expression(self, expression: str) -> bool:
+        expression = _strip_outer_parentheses(expression)
+        alternatives = _split_boolean(expression, "or")
+        if len(alternatives) > 1:
+            return any(self._eval_expression(part) for part in alternatives)
+        requirements = _split_boolean(expression, "and")
+        if len(requirements) > 1:
+            return all(self._eval_expression(part) for part in requirements)
+        negated = re.match(r"(?i)^not\b(.*)$", expression)
+        if negated:
+            return not self._eval_expression(negated.group(1))
+        match = _CONDITION_RE.match(expression)
         if not match:
-            return False  # OR/AND/%function conditions are Phase 2 -> treat as false
+            number = _as_number(_unquote(expression))
+            return number is not None and number != 0
         left, op, right = _unquote(match.group(1)), match.group(2), _unquote(match.group(3))
         if op == "=":
             return left.lower() == right.lower()
@@ -662,19 +768,37 @@ class VipMudPack:
     def _subst(self, text: str, wildcards: list[str]) -> str:
         text = _VAR_RE.sub(lambda m: self._api.get_var(m.group(1)), text)
         text = text.replace(_PLAY_HANDLE_TOKEN, self._last_handle)
-        # %var/%defined AFTER @vars so %var(@id) reads the variable @id names. This
-        # pair is the sound core's stop path: packs store a cue handle under a
-        # server-supplied name and later do `#pc %var(@id) stop` guarded by %defined.
-        text = _FUNC_RE.sub(self._call_function, text)
+        # Functions run after @vars so %var(@id) reads the variable @id names. Positional
+        # wildcards are expanded per argument inside _call_function, before %ifword compares
+        # them, then once more over the remaining text.
+        text = _FUNC_RE.sub(lambda match: self._call_function(match, wildcards), text)
+        return self._subst_wildcards(text, wildcards)
 
+    @staticmethod
+    def _subst_wildcards(text: str, wildcards: list[str]) -> str:
         def wildcard(match: re.Match[str]) -> str:
             index = int(match.group(1))
             return wildcards[index] if index < len(wildcards) else ""
 
         return _WILDCARD_RE.sub(wildcard, text)
 
-    def _call_function(self, match: re.Match[str]) -> str:
-        name, arg = match.group(1).lower(), _unquote(match.group(2).strip())
+    def _call_function(self, match: re.Match[str], wildcards: list[str]) -> str:
+        name = match.group(1).lower()
+        args = [
+            _unquote(self._subst_wildcards(arg, wildcards))
+            for arg in _split_function_args(match.group(2))
+        ]
+        if name == "ifword":
+            if len(args) < 2 or not args[0]:
+                return "0"
+            needle, words = args[0].casefold(), args[1].casefold()
+            delimiter = args[2].casefold() if len(args) > 2 else " "
+            if not delimiter:
+                return "1" if needle == words else "0"
+            return "1" if f"{delimiter}{needle}{delimiter}" in (
+                f"{delimiter}{words}{delimiter}"
+            ) else "0"
+        arg = args[0] if args else ""
         value = self._api.get_var(arg, None)
         if name == "defined":
             return "1" if value is not None else "0"

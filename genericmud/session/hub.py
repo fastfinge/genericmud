@@ -20,8 +20,15 @@ class SessionHub:
     def register(self, name: str, deliver: Callable[[str], None]) -> None:
         self._deliver[name] = deliver
 
-    def unregister(self, name: str) -> None:
-        self._deliver.pop(name, None)
+    def unregister(self, name: str, deliver: Callable[[str], None] | None = None) -> None:
+        """Remove ``name`` only if it still belongs to ``deliver`` when one is supplied.
+
+        Two tabs can use the same saved-world name. The newest registration wins, but
+        closing the older tab must not unregister the newer tab's callback.
+        """
+        current = self._deliver.get(name)
+        if deliver is None or current == deliver:
+            self._deliver.pop(name, None)
 
     def sessions(self) -> list[str]:
         return list(self._deliver)

@@ -7,6 +7,72 @@ fails the build on purpose.
 
 Entries start at 0.7.1. Earlier releases were tagged before this file existed.
 
+## 0.7.2 — 2026-07-30
+
+**Star Conquest communicator sounds actually play**
+
+* The earlier bracket-pattern fix let the communicator trigger fire, but its
+  per-channel selector still used VIPMud's `%ifWord` function, which genericMud
+  did not understand. Every selector therefore evaluated false before reaching
+  its sound.
+* `%ifWord`, parenthesized true/false results, `and`, `or`, and `NOT` conditions
+  now work. All 11 built-in Star Conquest communicator branches were checked
+  against the current 2.8.1.1 pack and resolve their real sound files; the two
+  configurable community-channel sounds work as well.
+
+**New worlds and saved worlds have separate dialogs**
+
+* Ctrl+N now opens a focused New World form. Ctrl+O opens an alphabetical
+  saved-world list with connection details, Connect, Edit, and New World
+  actions. Creating a world saves it by default.
+* Host and port errors stay in the form with a useful message instead of
+  silently connecting to port 4000. Invalid saved or imported ports are rejected,
+  and a damaged worlds file no longer prevents startup.
+
+**Find now finds the first result**
+
+* A new search includes the newest line when searching backward and the oldest
+  line when searching forward. This fixes searches in one-line output and terms
+  that only occur at a scrollback boundary.
+* Reopening Find restarts from the chosen edge. F3 and Shift+F3 remain exclusive
+  repeats, so they advance to another match. Find remains scoped to the output:
+  Ctrl+F in the command box keeps its normal editing behavior.
+
+**The Windows build opens only the GUI**
+
+* The packaged app now uses the Windows GUI subsystem, so launching
+  `genericMud.exe` no longer opens a terminal beside it. The local build script
+  now produces the same one-folder, audio-enabled layout as the release build.
+* Windowed startup and voice fallback paths no longer assume stdout or stderr
+  exists. The alternate web UI chooses free local ports, reports boot failures,
+  and closes its engine, socket, and HTTP server cleanly.
+
+**Typing and completion are more reliable**
+
+* Ctrl+Shift+Space can begin completion in reverse in both interfaces. The web
+  interface now also learns completion words from output.
+* Escape and modified Enter reach the engine in the web interface, while
+  copy/paste, browser Find, macOS Command shortcuts, and AltGraph typing remain
+  local. Commands entered while its socket is opening are queued after
+  authentication instead of disappearing.
+
+**Settings and soundpack updates survive interrupted writes**
+
+* Worlds, preferences, credentials, soundpack indexes, user rules, pack state,
+  and updater state now use atomic replacement. Corrupt or malformed rows fall
+  back safely instead of crashing startup or turning strings into enabled
+  settings.
+* Replacing a soundpack is staged and rolls back if copying or index persistence
+  fails. The no-code rules editor validates changes before replacing its working
+  rules.
+* Closing an older tab no longer unregisters a newer tab that happens to use the
+  same world name.
+
+**Update prompts carry useful release notes**
+
+* The updater dialog now receives this version's actual changelog section from
+  the GitHub release instead of generic installation boilerplate.
+
 ## 0.7.1 — 2026-07-27
 
 **Soundpack channel triggers work again**

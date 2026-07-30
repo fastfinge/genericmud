@@ -117,8 +117,9 @@ class MushclientPack:
         self._base_dir = api.base_dir
         # Default @sppath to the pack dir when the session didn't pre-set it from world.sounds, so
         # _find_in_sounds_dir can locate bundled audio by basename when the pack's own
-        # GetInfo()-anchored paths miss (e.g. Erion's split sounds/ + worlds/sounds/ layout). Mirrors
-        # the VIPMud default; the guard keeps a session-set world.sounds path from being clobbered.
+        # GetInfo()-anchored paths miss (e.g. Erion's split sounds/ + worlds/sounds/
+        # layout). Mirrors the VIPMud default; the guard keeps a session-set
+        # world.sounds path from being clobbered.
         if self._base_dir and not api.get_var("sppath"):
             api.set_var("sppath", self._base_dir)
         self._world_dir: str | None = None  # dir of the loaded world file; anchors GetInfo() paths
@@ -270,8 +271,13 @@ class MushclientPack:
         bit.band = lambda *a: _reduce_ints(a, lambda x, y: x & y)
         bit.bxor = lambda *a: _reduce_ints(a, lambda x, y: x ^ y)
         bit.bnot = lambda x=0: ~(int(_to_float(x) or 0)) & 0xFFFFFFFF
-        bit.lshift = lambda x=0, n=0: (int(_to_float(x) or 0) << int(_to_float(n) or 0)) & 0xFFFFFFFF
-        bit.rshift = lambda x=0, n=0: (int(_to_float(x) or 0) & 0xFFFFFFFF) >> int(_to_float(n) or 0)
+        bit.lshift = (
+            lambda x=0, n=0: (int(_to_float(x) or 0) << int(_to_float(n) or 0)) & 0xFFFFFFFF
+        )
+        bit.rshift = (
+            lambda x=0, n=0: (int(_to_float(x) or 0) & 0xFFFFFFFF)
+            >> int(_to_float(n) or 0)
+        )
         g.bit = bit
         trigger_flag = self._lua.table()
         for flag_name, value in _TRIGGER_FLAGS.items():

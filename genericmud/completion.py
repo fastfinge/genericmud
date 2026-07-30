@@ -80,7 +80,10 @@ class CompletionCycler:
     def prev(self) -> str | None:
         if not self._candidates:
             return None
-        self._index = (self._index - 1) % len(self._candidates)
+        if self._index == -1:
+            self._index = len(self._candidates) - 1
+        else:
+            self._index = (self._index - 1) % len(self._candidates)
         return self._candidates[self._index]
 
     def reset(self) -> None:

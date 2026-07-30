@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from genericmud.config.atomic import atomic_write_text
 from genericmud.config.worlds import config_dir
 
 SNOOZE_DURATION = timedelta(days=3)  # how long "Remind me later" defers the next prompt
@@ -36,11 +37,14 @@ def prefs_path() -> Path:
 
 def load_prefs(path: Path | None = None) -> UpdatePrefs:
     target = path or prefs_path()
-    if not target.exists():
+    try:
+        data = tomllib.loads(target.read_text(encoding="utf-8")).get("update", {})
+    except (OSError, ValueError):
         return UpdatePrefs()
-    data = tomllib.loads(target.read_text(encoding="utf-8")).get("update", {})
+    if not isinstance(data, dict):
+        return UpdatePrefs()
     return UpdatePrefs(
-        check_enabled=bool(data.get("check_enabled", True)),
+        check_enabled=data.get("check_enabled", True) is True,
         snoozed_until=data.get("snoozed_until"),
         snoozed_version=data.get("snoozed_version"),
         skipped_version=data.get("skipped_version"),
@@ -50,13 +54,12 @@ def load_prefs(path: Path | None = None) -> UpdatePrefs:
 
 def save_prefs(prefs: UpdatePrefs, path: Path | None = None) -> None:
     target = path or prefs_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
     lines = ["[update]", f"check_enabled = {'true' if prefs.check_enabled else 'false'}"]
     for key in ("snoozed_until", "snoozed_version", "skipped_version", "last_check"):
         value = getattr(prefs, key)
         if value:
             lines.append(f"{key} = {_quote(str(value))}")
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(target, "\n".join(lines) + "\n")
 
 
 def is_snoozed(prefs: UpdatePrefs, now: datetime | None = None) -> bool:
@@ -69,9 +72,14 @@ def is_snoozed(prefs: UpdatePrefs, now: datetime | None = None) -> bool:
         return False
     try:
         until = datetime.fromisoformat(prefs.snoozed_until)
-    except ValueError:
+    except (TypeError, ValueError):
         return False
-    return (now or datetime.now(UTC)) < until
+    if until.tzinfo is None:
+        return False
+    try:
+        return (now or datetime.now(UTC)) < until
+    except TypeError:
+        return False
 
 
 def snooze_timestamp(now: datetime | None = None) -> str:

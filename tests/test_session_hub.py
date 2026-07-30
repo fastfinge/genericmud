@@ -22,6 +22,20 @@ def test_hub_register_send_unregister():
     assert hub.sessions() == []
 
 
+def test_closing_an_older_duplicate_does_not_unregister_the_newer_session():
+    hub = SessionHub()
+    older: list[str] = []
+    newer: list[str] = []
+    hub.register("same-world", older.append)
+    hub.register("same-world", newer.append)
+
+    hub.unregister("same-world", older.append)
+
+    assert hub.send_to("same-world", "look") is True
+    assert older == []
+    assert newer == ["look"]
+
+
 def test_hub_broadcast_excludes_sender():
     hub = SessionHub()
     a: list[str] = []

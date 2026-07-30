@@ -13,7 +13,7 @@ This file is for running from source or building the exe yourself.
 Double-click **`run.bat`**, or from a terminal:
 
 ```bat
-run.bat                              :: open the window (Ctrl+N to connect)
+run.bat                              :: open the window (Ctrl+N new, Ctrl+O saved)
 run.bat mud.example.com 4000         :: auto-connect a tab
 run.bat mud.example.com 4000 --tls
 run.bat mud.example.com 4000 --web   :: the alternate web UI
@@ -28,8 +28,9 @@ Nothing else — the WebView2 runtime only matters for `--web`.
 ## Build a standalone exe
 
 Double-click **`build_windows.bat`**. The result lands in
-`dist\genericMud\genericMud.exe`. (Official zips are built the same way by
-the GitHub Actions workflow on every release tag.)
+`dist\genericMud\genericMud.exe`. It is a windowed application, so it opens
+the client without a second terminal window. Official zips use the same
+PyInstaller layout and GUI subsystem.
 
 ## Voice
 

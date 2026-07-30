@@ -13,11 +13,20 @@ from __future__ import annotations
 
 import argparse
 
+from genericmud.config.worlds import DEFAULT_PORT, parse_port
+
+
+def _port_arg(value: str) -> int:
+    try:
+        return parse_port(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="genericmud")
     parser.add_argument("host", nargs="?", default=None)
-    parser.add_argument("port", nargs="?", type=int, default=4000)
+    parser.add_argument("port", nargs="?", type=_port_arg, default=DEFAULT_PORT)
     parser.add_argument("--tls", action="store_true")
     parser.add_argument("--sounds", default=None, help="directory of sound files (MSP/soundpacks)")
     parser.add_argument("--web", action="store_true", help="use the web UI instead of native wx")

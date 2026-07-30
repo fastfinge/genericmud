@@ -17,10 +17,17 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
       - name: Install
         run: pip install ".[gui,voice,audio,package,dev]"
-      - name: Test
+      - name: Test Python
         run: python -m pytest -q
+      - name: Test web input
+        run: |
+          node --test tests/test_frontend_input.mjs tests/test_frontend_ws.mjs
+          node --check frontend/src/app.js
 
       # Fill the release body from CHANGELOG.md. self_update.check_for_update hands the
       # body straight to the in-app update dialog as its notes, so this text is what a
@@ -61,7 +68,7 @@ jobs:
       # compare against releases (and it fixes the diagnostic banner's "version=unknown").
       - name: Build
         run: >
-          pyinstaller --onedir --name genericMud --console
+          pyinstaller --onedir --name genericMud --windowed
           --copy-metadata genericmud
           --add-data "frontend;frontend"
           --add-data "genericmud/config/keymaps;genericmud/config/keymaps"

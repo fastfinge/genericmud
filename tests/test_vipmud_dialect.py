@@ -370,9 +370,85 @@ CHANNEL_CASES = [
 ]
 
 
+SC_COMMUNICATOR_TRIGGER = r"""
+#var silent 1
+#var commson 1
+#var vol 50
+#trig {[[]*] * *} {
+#if {%ifWord(Fringe,%1," ")} {
+#if {@commson = 1} {
+#if {@silent = 1} {
+#play {Star Conquest\general\comm\alliance.wav} @vol}};
+#abort 1};
+#if {%ifWord(General,%1," ")} {
+#if {@commson = 1} {
+#if {@silent = 1} {
+#play {Star Conquest\General\Comm\General.wav} @vol}};
+#abort 1};
+#if {%ifWord(Newbie,%1," ")} {
+#if {@commson = 1} {
+#if {@silent = 1} {
+#play {Star Conquest\General\Comm\newbie.wav} @vol}};
+#abort 1};
+#if {%ifWord(Tactical,%1," ")} {
+#if {@commson = 1} {
+#if {@silent = 1} {
+#play {Star Conquest\General\Comm\tactical.wav} @vol}};
+#abort 1}}
+"""
+
+
 @pytest.mark.parametrize(("pattern", "line"), CHANNEL_CASES)
 def test_bracketed_channel_patterns_match_their_lines(pattern, line):
     assert re.search(vip_pattern_to_regex(pattern), line)
+
+
+@pytest.mark.parametrize(
+    ("line", "cue"),
+    [
+        ('[General Communication] Sam transmits, "Hello."', r"Comm\General.wav"),
+        ('[Newbie Help] Sam transmits, "Hello."', r"Comm\newbie.wav"),
+        ('[Tactical Communication] Sam transmits, "Hello."', r"Comm\tactical.wav"),
+        ('[Fringe | 10: Conquest Status] Sam transmits, "Hello."', r"comm\alliance.wav"),
+    ],
+)
+def test_star_conquest_communicator_dispatches_a_distinct_channel_cue(line, cue):
+    sink, engine = _load(SC_COMMUNICATOR_TRIGGER)
+    engine.process_line(Line(line))
+    assert len(sink.played) == 1
+    assert sink.played[0]["file"].lower().endswith(cue.lower())
+
+
+def test_star_conquest_custom_community_channel_supports_compound_condition():
+    sink, engine = _load(
+        r"""
+        #var silent 1
+        #var commson 1
+        #var org {Explorers Communication}
+        #trig {[[]*] * *} {
+        #if {(%ifword(%1,@org," ")) and (@commson = 1) and (@silent = 1)} {
+        #play {Star Conquest\general\comm\community1.wav} 50}}
+        """
+    )
+    engine.process_line(Line('[Explorers Communication] Sam transmits, "Hello."'))
+    assert sink.played and sink.played[-1]["file"].endswith(r"comm\community1.wav")
+
+
+def test_star_conquest_not_defined_guard_initializes_a_missing_setting():
+    _sink, engine = _load("#if {NOT %Defined(commson)} {#var commson 1}")
+    assert engine.get_var("commson") == "1"
+
+
+def test_ifword_composes_with_or_without_matching_partial_words():
+    sink, engine = _load(
+        r"""
+        #trigger {channel *} {
+        #if {%ifword(Newbie,%1," ") or %ifword(General,%1," ")} {#say matched}}
+        """
+    )
+    engine.process_line(Line("channel General Communication"))
+    engine.process_line(Line("channel Generalized"))
+    assert [text for text, _channel, _interrupt in sink.spoken] == ["matched"]
 
 
 def test_literal_bracket_class_captures_the_channel_name():
