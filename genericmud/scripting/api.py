@@ -272,6 +272,12 @@ class ScriptApi:
         """
         if not file or "\x00" in file or is_unc(file) or is_traversal(file):
             return ""
+        # Windows-authored packs write relative paths with backslashes ("social\hit.wav").
+        # POSIX treats that as ONE filename, so the joined path never exists and resolution
+        # used to fall through to the basename index -- which picks the wrong file when two
+        # directories share a leaf name. Forward slashes work on every platform.
+        if not is_absolute(file):
+            file = file.replace("\\", "/")
         # Build the path exactly as before: join a relative name under the pack dir, then collapse
         # the doubled slash MUSHclient makes from GetInfo() (a trailing slash plus a plugin's
         # leading one). NOT os.path.normpath -- on Windows it flips / to \, mangling the
@@ -290,12 +296,15 @@ class ScriptApi:
         return resolved
 
     def _find_in_sounds_dir(self, path: str) -> str | None:
-        """Locate a missing sound by basename under the user's Sounds folder (``@sppath``).
+        """Locate a missing sound under the user's Sounds folder (``@sppath``).
 
         Packs hardcode where their audio lives; this lets the world's Sounds folder point at
         sounds kept elsewhere (e.g. Erion's separate sound repo), regardless of the pack's own
-        path assumptions. Indexed once per folder; a basename collision keeps the first match
-        (filenames are unique within a soundpack), and the walk only runs on a cache miss.
+        path assumptions. The index maps both the case-folded path relative to the folder and
+        the bare basename; the relative form is tried first so ``combat\\hit.wav`` and
+        ``social\\hit.wav`` resolve to their own directories instead of whichever ``hit.wav``
+        the walk met first. Indexed once per folder; a collision keeps the first match, and
+        the walk only runs on a cache miss.
         """
         sounds_dir = self._engine.get_var("sppath")
         if not sounds_dir or not os.path.isdir(sounds_dir):
@@ -304,10 +313,26 @@ class ScriptApi:
             index: dict[str, str] = {}
             for root, _dirs, files in os.walk(sounds_dir):
                 for name in files:
-                    index.setdefault(name.lower(), os.path.join(root, name))
+                    full = os.path.join(root, name)
+                    rel = os.path.relpath(full, sounds_dir).replace(os.sep, "/").lower()
+                    index.setdefault(rel, full)
+                    index.setdefault(name.lower(), full)
             self._sounds_index = index
             self._sounds_index_key = sounds_dir
-        # Split on both separators: a Windows-authored pack path keeps its backslashes when
-        # resolved on Linux, where os.path.basename only honours "/" and would miss the leaf.
-        leaf = path.replace("\\", "/").rsplit("/", 1)[-1]
-        return self._sounds_index.get(leaf.lower())
+        # Normalize on both separators: a Windows-authored pack path keeps its backslashes
+        # when resolved on Linux, where os.path functions only honour "/".
+        normalized = path.replace("\\", "/").lower()
+        # The dialects pre-resolve against @sppath/the pack dir, so an absolute request is
+        # reduced to its known-root-relative form -- a case-mismatched directory ("Comm\Hit.wav"
+        # on disk as "comm/hit.wav") then still finds the real file via the relative index.
+        for root in (sounds_dir, self._base_dir):
+            if not root:
+                continue
+            prefix = root.replace("\\", "/").lower().rstrip("/") + "/"
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix) :]
+                break
+        exact = self._sounds_index.get(normalized)
+        if exact is not None:
+            return exact
+        return self._sounds_index.get(normalized.rsplit("/", 1)[-1])

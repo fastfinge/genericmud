@@ -52,6 +52,17 @@ CLIENT_PREFIX = "/"  # "/alias", "/trigger", ... ; unknown /verbs pass through t
 MAX_ALIAS_DEPTH = 20  # guard against an alias/trigger that re-fires itself forever
 _PLUGIN_TICK_SECONDS = 0.25  # OnPluginTick cadence (MUSHclient ticks faster; see _arm_plugin_ticks)
 _PROMPT_IDLE_FLUSH_SECONDS = 0.25  # emit a newline-less prompt if the server sends no more data
+# CP1252 readings of the C1 range (0x80-0x9F): Windows MUDs advertising "Latin-1" almost
+# universally send CP1252, whose curly quotes/dashes live here. Decoding them as Latin-1
+# yields invisible C1 controls a screen reader garbles ("it\x92s"), and any trigger written
+# with the intended punctuation misses. The five bytes CP1252 leaves undefined stay as-is.
+_CP1252_C1_TABLE = str.maketrans(
+    {
+        byte: bytes([byte]).decode("cp1252")
+        for byte in range(0x80, 0xA0)
+        if bytes([byte]).decode("cp1252", "ignore")
+    }
+)
 # Interactive /alias and /trigger register under their own source so the soundpack builder's
 # reload (which clears user_rules.SOURCE) can't silently delete them.
 INTERACTIVE_SOURCE = "user-interactive"
@@ -517,17 +528,18 @@ class EngineApp:
             self._dispatch_msdp_start()
 
     def _decode_server_bytes(self, data: bytes) -> str:
-        """Decode server text: UTF-8 first, permanently falling back to Latin-1.
+        """Decode server text: UTF-8 first, permanently falling back to CP1252/Latin-1.
 
-        Many legacy MUDs (notably Spanish-language ones) send Latin-1; the old hard
-        utf-8/replace decode turned every accented letter into U+FFFD, which a screen
+        Many legacy MUDs (notably Spanish-language ones) send an 8-bit encoding; the old
+        hard utf-8/replace decode turned every accented letter into U+FFFD, which a screen
         reader speaks as garbage. A multibyte sequence split across telnet chunks is
-        NOT evidence of Latin-1 -- the incomplete tail is buffered for the next chunk.
-        The first genuinely invalid byte latches Latin-1 for the session (a MUD's
-        encoding doesn't change mid-stream, and Latin-1 decodes anything).
+        NOT evidence of a legacy encoding -- the incomplete tail is buffered for the next
+        chunk. The first genuinely invalid byte latches the fallback for the session (a
+        MUD's encoding doesn't change mid-stream, and Latin-1 decodes any byte). The
+        Latin-1 decode is then re-read through the CP1252 C1 table -- see _CP1252_C1_TABLE.
         """
         if self._server_latin1:
-            return data.decode("latin-1")
+            return data.decode("latin-1").translate(_CP1252_C1_TABLE)
         buf = self._decode_pending + data
         self._decode_pending = b""
         try:
@@ -539,8 +551,8 @@ class EngineApp:
                 return buf[: err.start].decode("utf-8")
             self._server_latin1 = True
             if self._diag is not None:
-                self._diag.event("encoding.latch", encoding="latin-1", at=err.start)
-            return buf.decode("latin-1")
+                self._diag.event("encoding.latch", encoding="cp1252", at=err.start)
+            return buf.decode("latin-1").translate(_CP1252_C1_TABLE)
 
     def _feed_text(self, text: str) -> None:
         self._pending += text

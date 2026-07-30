@@ -48,6 +48,14 @@ _SOUND_VARIANT_RE = re.compile(r"\*(\d+)(\.\w+)$")  # "name*N.ext": one random v
 _PATTERN_WILDCARD_RE = re.compile(r"&\{(\w+)\}|&(\w+)|(\*)|(\?)")
 # A bare "@name = value" statement is an assignment, not text to send.
 _ASSIGN_RE = re.compile(r"^@(\w+)\s*=\s*(.*)$")
+
+
+def _fold(name: str) -> str:
+    """Canonicalize a VIPMud variable name: VIPMud is case-insensitive (real packs
+    write ``vol`` and read ``@Vol``), but the engine's variable store is a plain dict
+    shared with case-sensitive dialects (MUSHclient GetVariable/SetVariable), so the
+    folding must happen at this dialect's boundary, on every read and write."""
+    return name.lower()
 # A single comparison for #if: left <op> right (longer operators first; <> is
 # VIPMud's not-equal and packs use it heavily, e.g. every pan/pitch gate in
 # Cosmic Rage's $sphook dispatch).
@@ -473,7 +481,7 @@ class VipMudPack:
     def _runner(self, body: str):
         def run(ctx: MatchContext) -> None:
             for name, value in ctx.named.items():  # named wildcards become @vars
-                self._api.set_var(name, value or "")
+                self._api.set_var(_fold(name), value or "")
             try:
                 self._execute_body(body, ctx.wildcards, line=ctx.line)
             except _Abort:
@@ -495,17 +503,20 @@ class VipMudPack:
         elif command in ("PLAY", "PLAYLOOP") and args:
             self._play(args, wildcards, loop=command == "PLAYLOOP")
         elif command == "VAR" and len(args) > 1:
-            name = self._subst(args[0].text, wildcards)  # @-indirect target supported
+            name = _fold(self._subst(args[0].text, wildcards))  # @-indirect target supported
             self._api.set_var(name, self._subst(args[1].text, wildcards))
         elif command == "GVAR" and len(args) > 1:  # global namespace; @-reads still resolve it
-            name = self._subst(args[0].text, wildcards)
+            name = _fold(self._subst(args[0].text, wildcards))
             self._api.set_gvar(name, self._subst(args[1].text, wildcards))
         elif command == "UNVAR" and args:
-            self._api.delete_var(self._subst(args[0].text, wildcards))
+            self._api.delete_var(_fold(self._subst(args[0].text, wildcards)))
         elif command == "MATH" and len(args) > 1:
             self._execute_math(args, wildcards)
         elif command == "STOP":
-            self._api.stop()
+            # VIPMud #Stop halts every playing sound. The api default channel ("sound")
+            # is one this dialect never plays on -- every cue goes to a per-cue vip-N
+            # channel -- so a plain stop() was a no-op against our own loops.
+            self._api.flush()
         elif command == "IF" and args:
             self._execute_if(args, wildcards, line)
         elif command == "FORALL" and len(args) > 1:
@@ -604,7 +615,7 @@ class VipMudPack:
             return
         index = _to_int(self._subst(args[2].text, wildcards), 0) - 1
         if 0 <= index < len(vfile.values):
-            self._api.set_var(args[1].text, vfile.values[index])
+            self._api.set_var(_fold(args[1].text), vfile.values[index])
 
     def _write_file(self, args: list[_Tok], wildcards: list[str]) -> None:
         """``#Write <handle> <value> <record>`` — set a 1-based record (flushed on #Close)."""
@@ -635,7 +646,9 @@ class VipMudPack:
         text = args[-1].text
         assignment = _ASSIGN_RE.match(text)
         if assignment:  # "@name = value" sets a variable; it isn't sent to the MUD
-            self._api.set_var(assignment.group(1), self._subst(assignment.group(2), wildcards))
+            self._api.set_var(
+                _fold(assignment.group(1)), self._subst(assignment.group(2), wildcards)
+            )
             return
         # Bare text runs "as if typed": VIPMud expands aliases in script bodies (packs
         # call their own aliases by name, e.g. CR's `makebetter`), so route through the
@@ -710,7 +723,7 @@ class VipMudPack:
             return
         if isinstance(result, float) and result.is_integer():
             result = int(result)
-        self._api.set_var(self._subst(args[0].text, wildcards), result)
+        self._api.set_var(_fold(self._subst(args[0].text, wildcards)), result)
 
     def _eval_condition(self, condition: str, wildcards: list[str]) -> bool:
         return self._eval_expression(self._subst(condition, wildcards))
@@ -766,7 +779,7 @@ class VipMudPack:
         # frequency: no live pitch control in the bus — accepted, ignored.
 
     def _subst(self, text: str, wildcards: list[str]) -> str:
-        text = _VAR_RE.sub(lambda m: self._api.get_var(m.group(1)), text)
+        text = _VAR_RE.sub(lambda m: self._api.get_var(_fold(m.group(1))), text)
         text = text.replace(_PLAY_HANDLE_TOKEN, self._last_handle)
         # Functions run after @vars so %var(@id) reads the variable @id names. Positional
         # wildcards are expanded per argument inside _call_function, before %ifword compares
@@ -799,7 +812,7 @@ class VipMudPack:
                 f"{delimiter}{words}{delimiter}"
             ) else "0"
         arg = args[0] if args else ""
-        value = self._api.get_var(arg, None)
+        value = self._api.get_var(_fold(arg), None)
         if name == "defined":
             return "1" if value is not None else "0"
         return value if value is not None else ""  # %var of an unset name reads empty

@@ -206,6 +206,7 @@ class SessionPanel(wx.Panel):
         self._voice: VoiceRouter | None = None
         self._history: list[str] = []
         self._hist_index = 0
+        self._history_draft = ""  # unsent input, parked while Up browses history
         self._alive = True
         self._pending: list[str] = []
         self._flush_scheduled = False
@@ -357,8 +358,12 @@ class SessionPanel(wx.Panel):
         # Someone who has tabbed into the output is arrowing back through it, and
         # AppendText would drag their caret to the end on every arriving line. Pin it
         # instead: landing at the bottom is what focusing the control does (see
-        # _on_output_focus), not what incoming text does.
-        anchor = self.output.GetInsertionPoint() if self.output.HasFocus() else None
+        # _on_output_focus), not what incoming text does. The Find dialog counts as
+        # "reading" too: it holds the focus, but _keep_caret_on_focus promises the
+        # search will run from the reader's position, so that position must survive
+        # any text arriving while the dialog is up.
+        preserve = self.output.HasFocus() or self._keep_caret_on_focus
+        anchor = self.output.GetInsertionPoint() if preserve else None
         self.output.AppendText("\n".join(self._pending) + "\n")
         self._pending.clear()
         removed = self._trim_output()
@@ -511,6 +516,7 @@ class SessionPanel(wx.Panel):
         if text:
             self._history.append(text)
         self._hist_index = len(self._history)
+        self._history_draft = ""
         if self.app is not None:
             self._loop.call_soon_threadsafe(self.app.on_ws_message, {"type": "input", "text": text})
 
@@ -595,8 +601,17 @@ class SessionPanel(wx.Panel):
     def _recall_history(self, direction: int) -> None:
         if not self._history:
             return
+        if direction < 0 and self._hist_index == len(self._history):
+            # Leaving the live edit line for history: park the unsent draft so Down
+            # brings it back instead of a blank field (losing typed-but-unsent input
+            # is silent data loss for someone who can't glance at the box).
+            self._history_draft = self.input.GetValue()
         self._hist_index = max(0, min(len(self._history), self._hist_index + direction))
-        value = self._history[self._hist_index] if self._hist_index < len(self._history) else ""
+        value = (
+            self._history[self._hist_index]
+            if self._hist_index < len(self._history)
+            else self._history_draft
+        )
         self.input.SetValue(value)
         self.input.SetInsertionPointEnd()
         # Deliberately silent -- do not add a self-voice call back here. Up/Down are

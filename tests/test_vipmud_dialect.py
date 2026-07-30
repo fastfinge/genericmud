@@ -18,6 +18,7 @@ from genericmud.scripting.vipmud_dialect import (
     tokenize_statements,
     vip_pattern_to_regex,
 )
+from genericmud.sound.bus import SoundBus
 from tests.helpers import RecordingSink
 
 
@@ -406,17 +407,20 @@ def test_bracketed_channel_patterns_match_their_lines(pattern, line):
 @pytest.mark.parametrize(
     ("line", "cue"),
     [
-        ('[General Communication] Sam transmits, "Hello."', r"Comm\General.wav"),
-        ('[Newbie Help] Sam transmits, "Hello."', r"Comm\newbie.wav"),
-        ('[Tactical Communication] Sam transmits, "Hello."', r"Comm\tactical.wav"),
-        ('[Fringe | 10: Conquest Status] Sam transmits, "Hello."', r"comm\alliance.wav"),
+        ('[General Communication] Sam transmits, "Hello."', "Comm/General.wav"),
+        ('[Newbie Help] Sam transmits, "Hello."', "Comm/newbie.wav"),
+        ('[Tactical Communication] Sam transmits, "Hello."', "Comm/tactical.wav"),
+        ('[Fringe | 10: Conquest Status] Sam transmits, "Hello."', "comm/alliance.wav"),
     ],
 )
 def test_star_conquest_communicator_dispatches_a_distinct_channel_cue(line, cue):
     sink, engine = _load(SC_COMMUNICATOR_TRIGGER)
     engine.process_line(Line(line))
     assert len(sink.played) == 1
-    assert sink.played[0]["file"].lower().endswith(cue.lower())
+    # The pack references the cue with backslashes; resolution normalizes separators so
+    # the path is real on every platform. Identity, not spelling, is the contract.
+    played = sink.played[0]["file"].replace("\\", "/").lower()
+    assert played.endswith(cue.lower())
 
 
 def test_star_conquest_custom_community_channel_supports_compound_condition():
@@ -431,7 +435,9 @@ def test_star_conquest_custom_community_channel_supports_compound_condition():
         """
     )
     engine.process_line(Line('[Explorers Communication] Sam transmits, "Hello."'))
-    assert sink.played and sink.played[-1]["file"].endswith(r"comm\community1.wav")
+    assert sink.played
+    played = sink.played[-1]["file"].replace("\\", "/")
+    assert played.endswith("comm/community1.wav")
 
 
 def test_star_conquest_not_defined_guard_initializes_a_missing_setting():
@@ -490,3 +496,50 @@ def test_bracket_patterns_compile_without_a_nested_set_warning():
 def test_plain_patterns_are_unchanged_by_the_class_support():
     assert vip_pattern_to_regex("You see * here.") == r"You\ see\ (.*?)\ here\."
     assert vip_pattern_to_regex("?Enter ?yes' or ?no'?") == r"(.)Enter\ (.)yes'\ or\ (.)no'(.)"
+
+
+def test_variable_names_are_case_insensitive():
+    # VIPMud folds variable case; real packs rely on it (Star Conquest's communicator
+    # sets `vol` and reads both `@vol` and `@Vol` -- the mismatch read as "", which
+    # #play turned into the default volume of 100).
+    sink, engine = _load(
+        "#VAR Vol {35}\n"
+        "#TRIGGER {go} {#play {x.wav} @vOL}\n"
+        "#TRIGGER {check} {#if {%defined(VOL)} {#say {have it}}}"
+    )
+    engine.process_line(Line("go"))
+    assert sink.played and abs(sink.played[0]["gain"] - 0.35) < 1e-9
+    engine.process_line(Line("check"))
+    assert ("have it", "main", False) in sink.spoken
+
+
+def test_math_assignment_and_read_fold_case_together():
+    sink, engine = _load(
+        "#TRIGGER {calc} {#math {Total} {2 + 3}; #say {@toTAL done}}"
+    )
+    engine.process_line(Line("calc"))
+    assert sink.spoken == [("5 done", "main", False)]
+
+
+def test_stop_reaches_the_dialects_own_cues_not_the_default_channel():
+    # #Stop halts every playing sound. Plays go to per-cue vip-N channels, so the old
+    # stop of the api default channel ("sound") never touched the dialect's own loops.
+    class _FlushBus(SoundBus):
+        def __init__(self) -> None:
+            super().__init__()
+            self.flushes = 0
+
+        def flush(self) -> None:
+            self.flushes += 1
+
+    bus = _FlushBus()
+    sink = RecordingSink()
+    engine = AutomationEngine(sink, sound=bus)
+    VipMudPack(ScriptApi(engine, source="vipmud")).load_source(
+        "#TRIGGER {go} {#playloop {amb.wav}}\n#TRIGGER {halt} {#stop}"
+    )
+    engine.process_line(Line("go"))
+    assert sink.played and sink.played[0]["channel"] == "vip-1"
+    engine.process_line(Line("halt"))
+    assert bus.flushes == 1
+    assert sink.stopped == []  # not the old, useless stop("sound")

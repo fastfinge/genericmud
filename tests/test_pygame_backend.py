@@ -286,3 +286,22 @@ def test_adjust_changes_live_volume_and_merges_pan():
     backend.adjust("cue", pan=1.0)
     assert channel.volume == (0.0, 0.5)  # pan changed, gain kept
     backend.adjust("nosuch", gain=0.1)  # unknown channel: silent no-op
+
+
+def test_all_loops_steal_releases_the_evicted_category():
+    # With every physical channel holding a loop, a new cue must steal one -- but the
+    # evicted category has to leave the maps, or two logical names alias one physical
+    # channel and stop/adjust/is_playing on the old name act on the NEW cue.
+    mixer = _FakeMixer(num=2)
+    backend = PygameSoundBackend(mixer)
+    backend.play("a.ogg", "loop-a", 1.0, 0.0, loop=True)
+    backend.play("b.ogg", "loop-b", 1.0, 0.0, loop=True)
+    backend.play("c.ogg", "loop-c", 1.0, 0.0, loop=True)  # forced steal
+    survivors = {"loop-a", "loop-b"} & set(backend._channels)
+    assert len(survivors) == 1  # exactly one owner was displaced and released
+    evicted = ({"loop-a", "loop-b"} - survivors).pop()
+    stolen = backend._channels["loop-c"]
+    assert backend.is_playing(evicted) is False  # the old name no longer answers for the new cue
+    before = stolen.stopped
+    backend.stop(evicted)  # stopping the evicted name must not kill the new cue
+    assert stolen.stopped == before

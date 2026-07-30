@@ -39,3 +39,24 @@ def test_find_caret_mapping_stays_in_native_units():
     assert "find_offset" not in source
     assert "self.output.PositionToXY(self.output.GetInsertionPoint())" in source
     assert "self.output.XYToPosition(0, line)" in source
+
+
+def test_output_caret_survives_appends_while_find_dialog_is_open():
+    # While the modal Find dialog holds focus, arriving output must not yank the
+    # underlying insertion point: _keep_caret_on_focus promises the search runs from
+    # the reader's position, so the flush has to anchor whenever that flag is set,
+    # not only while the output itself has focus.
+    source = (
+        Path(__file__).resolve().parents[1] / "genericmud/ui/wx_app.py"
+    ).read_text(encoding="utf-8")
+    assert "preserve = self.output.HasFocus() or self._keep_caret_on_focus" in source
+
+
+def test_history_recall_parks_and_restores_the_unsent_draft():
+    # Up parks the live edit line; Down past the newest entry restores it instead of
+    # blanking the field (silent data loss for a blind typist).
+    source = (
+        Path(__file__).resolve().parents[1] / "genericmud/ui/wx_app.py"
+    ).read_text(encoding="utf-8")
+    assert "self._history_draft = self.input.GetValue()" in source
+    assert "else self._history_draft" in source

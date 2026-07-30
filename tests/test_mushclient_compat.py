@@ -11,6 +11,7 @@ from genericmud.automation.engine import AutomationEngine
 from genericmud.model.buffer import Line
 from genericmud.scripting.api import ScriptApi
 from genericmud.scripting.mushclient_compat import MushclientPack
+from genericmud.sound.bus import SoundBus
 from tests.helpers import RecordingSink
 
 
@@ -839,3 +840,97 @@ def test_onplugintick_reaches_plugin_and_isconnected_is_real(tmp_path):
     engine.connected = False
     pack.dispatch("OnPluginTick")
     assert sink.sent == ["tick"]  # disconnected: the guard held
+
+
+_SOUND_WORLD = (
+    "<muclient><script><![CDATA[\n"
+    'function amb() PlaySound(1, "amb.wav", true, 50, 0) end\n'
+    'function hit() PlaySound(2, "hit.wav", false, 100, 25) end\n'
+    'function auto() PlaySound(0, "auto.wav", false, 100, 0) end\n'
+    'function tweak() PlaySound(1, "", false, 25, -100) end\n'
+    'function halt1() StopSound(1) end\n'
+    'function haltall() StopSound() end\n'
+    'function panit() Sound("pan=-100") end\n'
+    "]]></script>\n"
+    "<triggers>\n"
+    '<trigger match="amb" enabled="y" script="amb" sequence="50"/>\n'
+    '<trigger match="hit" enabled="y" script="hit" sequence="50"/>\n'
+    '<trigger match="auto" enabled="y" script="auto" sequence="50"/>\n'
+    '<trigger match="tweak" enabled="y" script="tweak" sequence="50"/>\n'
+    '<trigger match="halt1" enabled="y" script="halt1" sequence="50"/>\n'
+    '<trigger match="haltall" enabled="y" script="haltall" sequence="50"/>\n'
+    '<trigger match="panit" enabled="y" script="panit" sequence="50"/>\n'
+    "</triggers></muclient>"
+)
+
+
+class _SpyBus(SoundBus):
+    """Records adjust() calls and answers is_playing from a settable set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.adjusted: list[tuple[str, float | None, float | None]] = []
+        self.busy: set[str] = set()
+
+    def adjust(self, channel, gain=None, pan=None) -> None:
+        self.adjusted.append((channel, gain, pan))
+
+    def is_playing(self, channel) -> bool:
+        return channel in self.busy
+
+
+def _sound_pack(tmp_path) -> tuple[RecordingSink, AutomationEngine, _SpyBus]:
+    world = tmp_path / "World.mcl"
+    world.write_text(_SOUND_WORLD, encoding="latin-1")
+    sink = RecordingSink()
+    bus = _SpyBus()
+    engine = AutomationEngine(sink, sound=bus)
+    pack = MushclientPack(
+        ScriptApi(engine, source="p", base_dir=str(tmp_path)), full_stdlib=True
+    )
+    pack.load_file(str(world))
+    return sink, engine, bus
+
+
+def test_playsound_buffers_map_to_distinct_channels(tmp_path):
+    # MUSHclient's ten sound buffers play simultaneously; collapsing them onto one
+    # channel made a one-shot on buffer 2 cut off a loop started on buffer 1.
+    sink, engine, _bus = _sound_pack(tmp_path)
+    engine.process_line(Line("amb"))
+    engine.process_line(Line("hit"))
+    assert [p["channel"] for p in sink.played] == ["mush-1", "mush-2"]
+    assert sink.played[0]["loop"] is True and abs(sink.played[0]["gain"] - 0.5) < 1e-9
+    assert abs(sink.played[1]["pan"] - 0.25) < 1e-9
+
+
+def test_playsound_buffer_zero_picks_the_first_free_buffer(tmp_path):
+    sink, engine, bus = _sound_pack(tmp_path)
+    bus.busy = {"mush-1"}  # buffer 1 occupied -> 0 must select buffer 2
+    engine.process_line(Line("auto"))
+    assert [p["channel"] for p in sink.played] == ["mush-2"]
+
+
+def test_playsound_empty_filename_adjusts_the_playing_buffer(tmp_path):
+    # Per the PlaySound docs an empty FileName modifies the sound already playing in
+    # that buffer; it used to be forwarded as a (failing) play of "".
+    sink, engine, bus = _sound_pack(tmp_path)
+    engine.process_line(Line("amb"))
+    engine.process_line(Line("tweak"))
+    assert len(sink.played) == 1  # no phantom play of ""
+    assert bus.adjusted == [("mush-1", 0.25, -1.0)]
+
+
+def test_stopsound_stops_one_buffer_or_all(tmp_path):
+    # StopSound was previously unbound entirely (swallowed by the CapWords black
+    # hole), so packs had no way to stop a looping buffer.
+    sink, engine, _bus = _sound_pack(tmp_path)
+    engine.process_line(Line("halt1"))
+    assert sink.stopped == ["mush-1"]
+    engine.process_line(Line("haltall"))
+    assert sink.stopped[1:] == [f"mush-{n}" for n in range(1, 11)]
+
+
+def test_sound_pan_directive_adjusts_the_live_cue(tmp_path):
+    sink, engine, bus = _sound_pack(tmp_path)
+    engine.process_line(Line("panit"))
+    assert bus.adjusted == [("sound", None, -1.0)]

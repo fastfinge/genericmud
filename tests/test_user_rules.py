@@ -183,3 +183,14 @@ def test_interrupt_alone_is_a_real_action(tmp_path):
     sink, engine = _register(rules, tmp_path)
     engine.process_line(Line("DING you level"))
     assert sink.speech_stops == 1
+
+
+def test_decode_reads_cp1252_punctuation_not_c1_controls():
+    app = _app()
+    # Windows MUDs that "send Latin-1" nearly always send CP1252: 0x92 is a curly
+    # apostrophe there, but an invisible C1 control in Latin-1 -- which a screen
+    # reader garbles and no trigger written with the real character can match.
+    app.on_telnet_event(DataReceived(b"It\x92s a caf\xe9\r\n"))
+    assert app.buffer.lines()[-1].plain_text == "It’s a café"
+    app.on_telnet_event(DataReceived(b"\x93quoted\x94\r\n"))  # stays latched, still CP1252
+    assert app.buffer.lines()[-1].plain_text == "“quoted”"

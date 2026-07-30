@@ -79,3 +79,45 @@ def test_resolve_traces_a_total_miss(tmp_path):
     ScriptApi(engine, base_dir=str(pack))._resolve("ghost.wav")  # nowhere
     fields = engine.diag.fields("play.resolve")
     assert fields["exists"] is False and fields["fallback"] == "none"
+
+
+def test_resolve_backslash_subdir_keeps_its_directory(tmp_path):
+    # "social\hit.wav" is ONE filename on POSIX; the join must normalize separators so
+    # the pack's own copy resolves, not whichever same-named leaf a fallback walk met.
+    pack = tmp_path / "pack"
+    (pack / "combat").mkdir(parents=True)
+    (pack / "social").mkdir()
+    (pack / "combat" / "hit.wav").write_bytes(b"RIFF")
+    real = pack / "social" / "hit.wav"
+    real.write_bytes(b"RIFF")
+    assert _api(str(pack))._resolve("social\\hit.wav")[0] == str(real)
+
+
+def test_sounds_folder_fallback_prefers_the_relative_path_over_the_basename(tmp_path):
+    pack, sounds = tmp_path / "pack", tmp_path / "snd"
+    pack.mkdir()
+    (sounds / "combat").mkdir(parents=True)
+    (sounds / "social").mkdir()
+    (sounds / "combat" / "hit.wav").write_bytes(b"RIFF")
+    real = sounds / "social" / "hit.wav"
+    real.write_bytes(b"RIFF")
+    api = _api(str(pack))
+    api.set_var("sppath", str(sounds))
+    # Wrong-case, backslash-separated, and missing from the pack dir: the relative
+    # index must still pick social/, not combat/'s identically-named leaf.
+    assert api._resolve("Social\\Hit.wav")[0] == str(real)
+
+
+def test_sounds_folder_fallback_reduces_an_absolute_request_to_its_relative_form(tmp_path):
+    # The dialects pre-resolve @sppath refs to absolute paths; a case-mismatched
+    # directory must resolve via the relative index instead of basename roulette.
+    pack, sounds = tmp_path / "pack", tmp_path / "snd"
+    pack.mkdir()
+    (sounds / "comm").mkdir(parents=True)
+    (sounds / "misc").mkdir()
+    (sounds / "misc" / "beep.wav").write_bytes(b"RIFF")
+    real = sounds / "comm" / "beep.wav"
+    real.write_bytes(b"RIFF")
+    api = _api(str(pack))
+    api.set_var("sppath", str(sounds))
+    assert api._resolve(str(sounds) + "/Comm/Beep.wav")[0] == str(real)

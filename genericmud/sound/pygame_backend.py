@@ -202,6 +202,13 @@ class PygameSoundBackend:
                 return index
         # Everything live is a loop -- an unavoidable steal; take the channel at the cursor.
         index = _next_channel % count
+        # Release whichever category held this slot, or two logical channels end up
+        # aliased to one physical channel: stop/adjust/is_playing on the evicted name
+        # would then act on the NEW cue (and wreck is-it-still-playing switching logic).
+        for category, held in list(self._indices.items()):
+            if held == index:
+                self._release(category)
+                break
         _next_channel = (index + 1) % count
         return index
 

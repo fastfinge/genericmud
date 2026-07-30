@@ -35,8 +35,14 @@ _SEND_TO_SCRIPT = "12"
 _DEFAULT_TRIGGER_SEQUENCE = "100"
 
 _SOUND_CHANNEL = "sound"  # MUSHclient Sound() is a single-voice channel
+_SOUND_BUFFERS = 10  # MUSHclient PlaySound offers buffers 1..10; 0 = first free
 _VOLUME_MAX = 100.0  # MUSHclient volume is 0..100
 _PAN_MAX = 100.0  # bass/MUSHclient pan is -100..100; the SoundBus wants -1..1
+
+
+def _buffer_channel(number: int) -> str:
+    """The logical sound-bus channel for a MUSHclient PlaySound buffer."""
+    return f"mush-{number}"
 _AUDIO_CHANNEL_PREFIX = "erion-audio-"  # one bus channel per cue, so stop(id) can target it
 
 # Lifecycle entry points MUSHclient calls on each plugin. All plugins share one _G here,
@@ -247,6 +253,7 @@ class MushclientPack:
             "Hyperlink": lambda *_a: None,
             "GetSoundKeyword": lambda *_a: "",
             "PlaySound": self._play_sound,
+            "StopSound": self._stop_sound,
             "Sound": self._sound,
             "GetInfo": self._get_info,
             "DoAfterSpecial": self._do_after_special,
@@ -486,11 +493,44 @@ class MushclientPack:
         # MUSHclient PlaySound(buffer, file, loop, volume, pan): volume 0..100, pan -100..100.
         # Both were dropped before, so every cue played full-volume and centered -- pan carries
         # directional information for a blind user, so that's a real accessibility loss.
+        #
+        # The buffer selects one of 10 concurrent slots; ignoring it collapsed every cue
+        # onto one channel, so a one-shot on buffer 2 cut off a loop started on buffer 1.
+        # Buffer 0 means "the first free buffer, or buffer 1 if none are free" (gammon.com.au
+        # PlaySound docs). An empty filename modifies the sound already playing in that
+        # buffer (volume/pan) rather than starting one; stopping is StopSound's job.
         vol = _to_float(volume)
         pan_value = _to_float(pan)
         gain = vol / _VOLUME_MAX if vol is not None else 1.0
         pan_out = max(-1.0, min(1.0, pan_value / _PAN_MAX)) if pan_value is not None else 0.0
-        self._api.play(str(file), channel=_SOUND_CHANNEL, gain=gain, pan=pan_out, loop=bool(loop))
+        number = int(_to_float(buffer) or 0)
+        file_text = str(file or "")
+        if not file_text:
+            if 1 <= number <= _SOUND_BUFFERS:
+                self._api.adjust(_buffer_channel(number), gain=gain, pan=pan_out)
+            return  # buffer 0 selects a FREE slot: nothing is playing there to modify
+        if number == 0:
+            number = next(
+                (
+                    n
+                    for n in range(1, _SOUND_BUFFERS + 1)
+                    if not self._api.is_playing(_buffer_channel(n))
+                ),
+                1,
+            )
+        number = min(max(number, 1), _SOUND_BUFFERS)
+        self._api.play(
+            file_text, channel=_buffer_channel(number), gain=gain, pan=pan_out, loop=bool(loop)
+        )
+
+    def _stop_sound(self, buffer: object = 0) -> None:
+        """MUSHclient ``StopSound(buffer)``: stop one of the 10 sound buffers, 0 = all."""
+        number = int(_to_float(buffer) or 0)
+        if number == 0:
+            for n in range(1, _SOUND_BUFFERS + 1):
+                self._api.stop(_buffer_channel(n))
+        elif 1 <= number <= _SOUND_BUFFERS:
+            self._api.stop(_buffer_channel(number))
 
     def _sound(self, arg: object = "", *_rest: object) -> None:
         """MUSHclient ``Sound``: a path plays it; a ``key=value`` string is a control
@@ -503,13 +543,18 @@ class MushclientPack:
 
     def _sound_control(self, directive: str) -> None:
         key, _, raw = directive.partition("=")
-        if key.strip().lower() != "volume":
-            return  # pan/freq: no live per-cue control in the bus yet — accept, ignore
+        key = key.strip().lower()
         try:
             level = float(raw)
         except ValueError:
             return
-        if level <= 0:
+        if key == "pan":
+            # Live pan on the playing cue -- directional cues are how a pack tells a blind
+            # player WHERE something happened, so dropping this loses real information.
+            self._api.adjust(_SOUND_CHANNEL, pan=max(-1.0, min(1.0, level / _PAN_MAX)))
+        elif key != "volume":
+            return  # freq: no live pitch control in the bus — accept, ignore
+        elif level <= 0:
             self._api.stop(_SOUND_CHANNEL)  # "volume=0" is the soundpack idiom for stop
         else:
             # adjust() re-levels the PLAYING cue; set_volume would permanently drop the whole
