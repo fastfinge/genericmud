@@ -7,6 +7,19 @@ fails the build on purpose.
 
 Entries start at 0.7.1. Earlier releases were tagged before this file existed.
 
+## 0.7.3 — 2026-07-30
+
+**Find now lands the reading cursor on the line it announces**
+
+* On Windows, a successful Find spoke the matched line but parked the cursor
+  above it — one character higher for every line of scrollback — so arrowing
+  after a search read an unrelated line. The cursor now lands exactly on the
+  announced line, at its start, for new searches and F3/Shift+F3 repeats.
+* A search result that had just arrived and was not yet painted into the
+  output could fail to move the cursor at all; it resolves now.
+* A line that merely contained the matched line inside longer text can no
+  longer capture the cursor.
+
 ## 0.7.2 — 2026-07-30
 
 **Star Conquest communicator sounds actually play**
