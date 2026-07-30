@@ -86,7 +86,7 @@ from genericmud.session.diaglog import DiagnosticLog, make_diagnostic_log
 from genericmud.session.hub import SessionHub
 from genericmud.sound.pygame_backend import make_pygame_backend
 from genericmud.transport.connection import MudConnection
-from genericmud.ui.scrollback import FindState, anchor_after_append, find_offset
+from genericmud.ui.scrollback import FindState, anchor_after_append, find_line
 from genericmud.update import self_update
 from genericmud.voice.factory import make_voice_backend
 from genericmud.voice.router import VoiceRouter
@@ -462,22 +462,45 @@ class SessionPanel(wx.Panel):
         The engine searches the whole buffer; this control only holds the last
         _OUTPUT_CAP_LINES. A match older than that leaves the caret alone and the spoken
         line is all the reader gets, which beats moving them somewhere wrong.
+
+        The mapping runs in whole lines, converted at the edges with PositionToXY and
+        XYToPosition: insertion-point units and GetValue() string offsets disagree on
+        Windows (the native control counts a line break as two characters, GetValue
+        renders one), so a raw string offset lands the caret above the matched line.
         """
         restart = self._find_restart
         self._find_restart = False
         if not message.get("found"):
             return
-        text = self.output.GetValue()
+        if self._pending:
+            self._flush_output()  # the matched line may still be in the append batch
+        lines = self.output.GetValue().split("\n")
+        ok, _col, caret_line = self.output.PositionToXY(self.output.GetInsertionPoint())
+        if not ok:
+            caret_line = len(lines) - 1
         matched_line = message.get("text", "")
-        offset = find_offset(
-            text,
+        line = find_line(
+            lines,
             matched_line,
-            self.output.GetInsertionPoint(),
+            caret_line,
             forward=self._find_direction,
-            case_sensitive=True,  # engine returned the exact rendered line
             from_edge=restart,
         )
-        if offset is None:
+        if line is None and not restart:
+            # The caret drifted from the engine's cursor (the reader arrowed away, or
+            # earlier hits were older than the control holds). Take the edge occurrence
+            # rather than leaving the caret while the matched line is on screen.
+            line = find_line(
+                lines,
+                matched_line,
+                caret_line,
+                forward=self._find_direction,
+                from_edge=True,
+            )
+        if line is None:
+            return
+        offset = self.output.XYToPosition(0, line)
+        if offset == -1:
             return
         self.output.SetInsertionPoint(offset)
         self.output.ShowPosition(offset)

@@ -7,12 +7,17 @@ text out from under someone who has tabbed in and is arrowing back through it: w
 ``AppendText`` drags the caret to the end, and dropping the oldest lines shifts every
 surviving offset down. :func:`anchor_after_append` is that offset arithmetic.
 
-:func:`find_offset` backs the Find keys, locating a match in the control's text so the
-caret can follow the engine's scrollback search onto the same line.
+:func:`find_line` backs the Find keys, locating the engine's matched line among the
+control's lines so the caret can follow the scrollback search onto the same line.
+Everything here works in whole lines, never raw character offsets: on Windows the
+native control counts a line break as two characters while ``GetValue()`` renders it
+as one, so a string offset walks off the caret's actual position by one character per
+preceding line.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -27,31 +32,34 @@ def anchor_after_append(anchor: int, removed: int, last_position: int) -> int:
     return max(0, min(anchor - removed, last_position))
 
 
-def find_offset(
-    text: str,
-    needle: str,
-    start: int,
+def find_line(
+    lines: Sequence[str],
+    needle_line: str,
+    current: int,
     *,
     forward: bool,
-    case_sensitive: bool,
     from_edge: bool = False,
 ) -> int | None:
-    """Offset of the next (or previous) ``needle`` in ``text``, or None for no match.
+    """Index of the line equal to ``needle_line``, or None if it isn't among ``lines``.
 
-    ``start`` is the caret. Repeated searches begin strictly past it so they advance.
-    ``from_edge`` is for a newly-submitted dialog search: it includes the first or last
-    visible line, matching the engine cursor's reset to that edge.
+    The engine matched a whole scrollback line, so only a control line equal to it
+    counts; a longer line merely containing the text must not capture the caret.
+    ``current`` is the caret's line. Repeated searches begin strictly past it so they
+    advance. ``from_edge`` is for a newly-submitted dialog search: it takes the first
+    (forward) or last (backward) occurrence, matching the engine cursor's reset.
     """
-    if not needle:
+    if not needle_line:
         return None
-    haystack = text if case_sensitive else text.lower()
-    target = needle if case_sensitive else needle.lower()
-    caret = max(0, start)
     if from_edge:
-        found = haystack.find(target) if forward else haystack.rfind(target)
+        indices = range(len(lines)) if forward else range(len(lines) - 1, -1, -1)
+    elif forward:
+        indices = range(max(current + 1, 0), len(lines))
     else:
-        found = haystack.find(target, caret + 1) if forward else haystack.rfind(target, 0, caret)
-    return None if found < 0 else found
+        indices = range(min(current, len(lines)) - 1, -1, -1)
+    for i in indices:
+        if lines[i] == needle_line:
+            return i
+    return None
 
 
 @dataclass

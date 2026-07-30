@@ -27,3 +27,15 @@ def test_find_shortcuts_remain_scoped_to_the_output_control():
     ).read_text(encoding="utf-8")
     assert "self.output.Bind(wx.EVT_KEY_DOWN, self._on_output_key)" in source
     assert '"&Find in Output...\\tCtrl+F"' not in source
+
+
+def test_find_caret_mapping_stays_in_native_units():
+    # Insertion-point units and GetValue() offsets disagree on Windows (a line break
+    # is two native characters, one in the string), so the caret sync must convert
+    # through the control's own line functions, never position by string offset.
+    source = (
+        Path(__file__).resolve().parents[1] / "genericmud/ui/wx_app.py"
+    ).read_text(encoding="utf-8")
+    assert "find_offset" not in source
+    assert "self.output.PositionToXY(self.output.GetInsertionPoint())" in source
+    assert "self.output.XYToPosition(0, line)" in source

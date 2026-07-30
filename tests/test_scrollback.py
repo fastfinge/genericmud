@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from genericmud.ui.scrollback import FindState, anchor_after_append, find_offset
+from genericmud.ui.scrollback import FindState, anchor_after_append, find_line
 
 
 def test_plain_append_leaves_the_anchor_alone():
@@ -30,72 +30,49 @@ def test_everything_trimmed_leaves_the_anchor_at_zero():
 
 # --- find ---
 
-TEXT = "a dragon roars\nthe Dragon sleeps\na dragon waits\n"
-FIRST = TEXT.index("dragon")  # 2
-MIDDLE = TEXT.index("Dragon")  # the capitalised one
-LAST = TEXT.rindex("dragon")
+# The control's GetValue() split on "\n": duplicate hit lines at 0 and 3, a longer
+# line at 1 that merely CONTAINS the hit text, and the trailing empty line the
+# control's closing newline produces.
+LINES = ["you say hi", "and then you say hi again", "quiet", "you say hi", ""]
+HIT = "you say hi"
 
 
-def test_find_forward_starts_past_the_caret():
-    assert find_offset(TEXT, "dragon", 0, forward=True, case_sensitive=False) == FIRST
+def test_new_find_takes_the_direction_edge():
+    assert find_line(LINES, HIT, 2, forward=True, from_edge=True) == 0
+    assert find_line(LINES, HIT, 2, forward=False, from_edge=True) == 3
 
 
-def test_new_find_includes_the_direction_edge():
-    assert (
-        find_offset(
-            TEXT,
-            "dragon",
-            MIDDLE,
-            forward=True,
-            case_sensitive=False,
-            from_edge=True,
-        )
-        == FIRST
-    )
-    assert (
-        find_offset(
-            TEXT,
-            "dragon",
-            MIDDLE,
-            forward=False,
-            case_sensitive=False,
-            from_edge=True,
-        )
-        == LAST
-    )
-
-
-def test_repeating_a_forward_find_walks_to_the_next_match():
+def test_repeating_a_find_walks_strictly_past_the_caret_line():
     # Sitting on a match and searching again must move on, not sit still.
-    second = find_offset(TEXT, "dragon", FIRST, forward=True, case_sensitive=False)
-    assert second == MIDDLE
-    assert find_offset(TEXT, "dragon", second, forward=True, case_sensitive=False) == LAST
+    assert find_line(LINES, HIT, 0, forward=True) == 3
+    assert find_line(LINES, HIT, 3, forward=False) == 0
 
 
-def test_find_backward_starts_before_the_caret():
-    assert find_offset(TEXT, "dragon", LAST, forward=False, case_sensitive=False) == MIDDLE
+def test_a_longer_line_containing_the_text_is_not_a_match():
+    # The engine matched a whole line; a substring occurrence must not take the caret.
+    assert find_line(LINES, HIT, 0, forward=True) == 3  # line 1 contains HIT, skipped
+    assert find_line(["and then you say hi again", ""], HIT, 1, forward=False) is None
 
 
-def test_case_sensitive_find_skips_the_wrong_case():
-    # "Dragon" is between them, and must be passed over when case matters.
-    assert find_offset(TEXT, "dragon", FIRST, forward=True, case_sensitive=True) == LAST
-
-
-def test_case_sensitive_find_matches_the_exact_case():
-    assert find_offset(TEXT, "Dragon", 0, forward=True, case_sensitive=True) == MIDDLE
+def test_matching_is_exact_on_case():
+    assert find_line(LINES, "You say hi", 2, forward=True, from_edge=True) is None
 
 
 def test_no_match_returns_none_rather_than_wrapping():
-    assert find_offset(TEXT, "dragon", LAST, forward=True, case_sensitive=False) is None
-    assert find_offset(TEXT, "griffin", 0, forward=True, case_sensitive=False) is None
+    assert find_line(LINES, HIT, 3, forward=True) is None
+    assert find_line(LINES, HIT, 0, forward=False) is None
+    assert find_line(LINES, "griffin", 0, forward=True, from_edge=True) is None
 
 
 def test_empty_needle_never_matches():
-    assert find_offset(TEXT, "", 0, forward=True, case_sensitive=False) is None
+    # The trailing empty line is real text in the control; an empty search term
+    # must not park the caret there.
+    assert find_line(LINES, "", 0, forward=True) is None
 
 
-def test_negative_caret_is_treated_as_the_start():
-    assert find_offset(TEXT, "dragon", -50, forward=True, case_sensitive=False) == FIRST
+def test_caret_line_outside_the_control_is_tolerated():
+    assert find_line(LINES, HIT, -50, forward=True) == 0
+    assert find_line(LINES, HIT, 900, forward=False) == 3
 
 
 def test_find_state_defaults_to_a_backwards_case_insensitive_search():
