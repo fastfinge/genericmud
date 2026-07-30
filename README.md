@@ -4,8 +4,8 @@ An accessible MUD client that talks. It speaks the game through the screen
 reader you already run (NVDA, JAWS, VoiceOver — with a system-voice fallback),
 plays soundpacks, and gives you keyboard tools for everything: reviewing
 output, recalling chat, walking, and building triggers — no scripting needed.
-It's a modern, free replacement for VIPMud, and it loads many VIPMud `.set`
-and MUSHclient soundpacks as-is.
+It's free, and it loads many existing VIPMud `.set` and MUSHclient soundpacks
+as-is, so a pack you already use very likely just works.
 
 ## Getting it running
 
@@ -84,8 +84,9 @@ main output.
 - Type `.3n2e` to speed-walk three north and two east. Type `..3n2e` to walk
   it one room at a time, stopping if something blocks the way.
 - **Alt+B** drops a breadcrumb. Wander wherever; **Alt+R** walks you straight
-  back, skipping any detours you took. **Alt+W** says where you are (on MUDs
-  that support GMCP). **Alt+S** stops a walk in progress.
+  back, skipping any detours you took. **Alt+W** says where you are, on MUDs
+  that share your location with the client. **Alt+S** stops a walk in
+  progress.
 - Typing `sh goblin` when you made an alias `sh *` → `shoot %1`? That's in
   the soundpack builder, next section.
 
@@ -104,9 +105,9 @@ immediately and works on the very next line from the MUD.
 
 Ready-made packs: **File → Browse Soundpacks Online** pulls from the
 community Soundpack Vault, and **File → Set Up a Soundpack** installs one
-from a folder, zip, or git URL. VIPMud `.set` packs and MUSHclient packs
-load too (MUSHclient ones ask for your trust first, because they contain
-code).
+from a folder, a zip, or a download link. VIPMud `.set` packs and MUSHclient
+packs load too (MUSHclient ones ask for your trust first, because they
+contain code).
 
 ## Sharing your setup
 
