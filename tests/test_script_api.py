@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import os
+
 from genericmud.automation.engine import AutomationEngine
 from genericmud.scripting.api import ScriptApi
 from tests.helpers import RecordingDiag, RecordingSink
+
+
+def _resolves_to(resolved: str, expected) -> bool:
+    """The resolved path points at the expected file.
+
+    Windows resolution yields mixed separators and case (its filesystem accepts both), so
+    compare by identity of the actual file rather than exact string form.
+    """
+    return os.path.samefile(resolved, expected)
 
 
 def _api(base_dir: str) -> ScriptApi:
@@ -90,7 +101,7 @@ def test_resolve_backslash_subdir_keeps_its_directory(tmp_path):
     (pack / "combat" / "hit.wav").write_bytes(b"RIFF")
     real = pack / "social" / "hit.wav"
     real.write_bytes(b"RIFF")
-    assert _api(str(pack))._resolve("social\\hit.wav")[0] == str(real)
+    assert _resolves_to(_api(str(pack))._resolve("social\\hit.wav")[0], real)
 
 
 def test_sounds_folder_fallback_prefers_the_relative_path_over_the_basename(tmp_path):
@@ -105,7 +116,7 @@ def test_sounds_folder_fallback_prefers_the_relative_path_over_the_basename(tmp_
     api.set_var("sppath", str(sounds))
     # Wrong-case, backslash-separated, and missing from the pack dir: the relative
     # index must still pick social/, not combat/'s identically-named leaf.
-    assert api._resolve("Social\\Hit.wav")[0] == str(real)
+    assert _resolves_to(api._resolve("Social\\Hit.wav")[0], real)
 
 
 def test_sounds_folder_fallback_reduces_an_absolute_request_to_its_relative_form(tmp_path):
@@ -120,4 +131,4 @@ def test_sounds_folder_fallback_reduces_an_absolute_request_to_its_relative_form
     real.write_bytes(b"RIFF")
     api = _api(str(pack))
     api.set_var("sppath", str(sounds))
-    assert api._resolve(str(sounds) + "/Comm/Beep.wav")[0] == str(real)
+    assert _resolves_to(api._resolve(str(sounds) + "/Comm/Beep.wav")[0], real)
