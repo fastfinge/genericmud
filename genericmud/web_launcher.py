@@ -109,7 +109,12 @@ def run(args) -> None:
             if bridge_instance is not None:
                 await bridge_instance.stop()
 
-        if loop.is_running():
+        # `ready` is set inside boot() -- i.e. during run_until_complete, BEFORE run_forever
+        # starts -- so the caller can reach here in the window where the loop is not yet
+        # "running". Gate on is_closed(), not is_running(): run_coroutine_threadsafe still
+        # schedules the shutdown and it executes once run_forever begins. The old is_running()
+        # guard skipped teardown in that window, leaking the app/connection/bridge on exit.
+        if not loop.is_closed():
             future = asyncio.run_coroutine_threadsafe(shutdown(), loop)
             try:
                 future.result(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
