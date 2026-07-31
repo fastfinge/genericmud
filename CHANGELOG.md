@@ -7,6 +7,68 @@ fails the build on purpose.
 
 Entries start at 0.7.1. Earlier releases were tagged before this file existed.
 
+## 0.8.0 — 2026-07-31
+
+**genericMud now runs on Mac and Linux**
+
+* Every release now ships three builds: the Windows folder, a Mac app
+  (`genericMud-macos.zip` — unzip and drag `genericMud.app` to Applications),
+  and a Linux folder (`genericMud-linux.tar.gz`). The same client, the same
+  soundpacks, on all three.
+* Self-voice speaks everywhere: through your screen reader or SAPI on Windows
+  as before, through the built-in Mac voice, and through speech-dispatcher on
+  Linux (the same speech engine Orca uses).
+
+**Soundpacks behave much more like they did in VIPMud and MUSHclient**
+
+* Variable names in VIPMud packs no longer care about capitalization, so a
+  pack that sets `vol` and reads `@Vol` gets your volume instead of full blast.
+* `#Stop` actually stops the pack's own sounds, including loops.
+* MUSHclient packs get real sound buffers: a hit sound no longer cuts off
+  ambience started in another buffer, `StopSound` works, and live pan moves
+  a playing sound instead of being ignored.
+* Sounds referenced with Windows-style paths, or in folders whose name differs
+  only in capitalization, now resolve to the right file — including when two
+  folders contain a file with the same name.
+* A pack that keeps re-registering temporary triggers no longer slows the
+  client down over a long session.
+
+**Your reading position stays where you put it**
+
+* Reviewing scrollback or a chat channel while new lines arrive no longer
+  silently moves you onto lines you already heard.
+* Output arriving while the Find window is open no longer loses your place.
+* Pressing Up to check an old command no longer throws away what you had
+  half-typed; Down brings it back.
+* The stop keys — Escape and F11 for speech, Shift+F11 for sound — now work
+  while you're reading the output box, not only from the command line.
+
+**The client tells you what happened**
+
+* Connecting, enabling or trusting a pack, and adding, changing, or deleting
+  a rule in the soundpack builder are all spoken now instead of silent.
+* Deleting a builder rule asks first. A rule missing its match text says so
+  instead of silently vanishing.
+* Disconnect messages are plain language instead of error codes, and an
+  untrusted pack now tells you where to trust it.
+* On first launch the client welcomes you and names the keys to get started.
+
+**Finding soundpacks is simpler**
+
+* Browse Soundpacks Online only lists packs genericMud can load. A checkbox
+  shows packs made for other clients if you want to try one anyway.
+* Everything soundpack lives in one Soundpacks menu: manage, browse online,
+  set up from a folder, and the builder.
+
+**Safety and reliability**
+
+* Your password is kept out of the session log, command history, and
+  auto-repeat while the server hides typing, and auto-login can no longer be
+  tricked into typing your credentials by in-game text later in the session.
+* A server turning compression off mid-session no longer silences the client
+  until you reconnect, a full disk no longer stops output, and disconnecting
+  by hand now stops pack music instead of letting it restart itself.
+
 ## 0.7.3 — 2026-07-30
 
 **Find now lands the reading cursor on the line it announces**
