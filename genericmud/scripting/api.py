@@ -160,6 +160,10 @@ class ScriptApi:
         opts.setdefault("source", self._source)
         self._engine.add_trigger(pattern, callback, **opts)  # type: ignore[arg-type]
 
+    def remove_trigger(self, name: str) -> None:
+        """Drop a previously-registered trigger by name (dynamic MUSHclient triggers)."""
+        self._engine.remove_trigger(name)
+
     def add_alias(self, pattern: str, callback: Callback, **opts: object) -> None:
         opts.setdefault("source", self._source)
         self._engine.add_alias(pattern, callback, **opts)  # type: ignore[arg-type]

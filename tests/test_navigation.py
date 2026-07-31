@@ -128,3 +128,10 @@ def test_where_key_reports_gmcp_room():
     app.on_telnet_event(Subnegotiation(OPT_GMCP, payload))
     app.on_ws_message({"type": "key", "key": "alt+w"})  # nav:where
     assert any("Town Square" in spoken for spoken in backend.spoken)
+
+
+def test_expand_speedwalk_rejects_zero_count_leg():
+    # "3n0e" is a typo; the zero leg used to be silently swallowed, walking 3n and dropping
+    # the rest with no indication. Reject the whole run so it falls back to a literal command.
+    assert expand_speedwalk("3n0e") == []
+    assert expand_speedwalk("0n") == []

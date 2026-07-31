@@ -60,3 +60,25 @@ async def test_ws_bridge_no_token_is_open_for_legacy_and_tests():
         assert any(m.get("type") == "input" for m in received)
     finally:
         await bridge.stop()
+
+
+async def test_second_renderer_supersedes_and_closes_the_first():
+    received: list[dict] = []
+    bridge = WsBridge(lambda m: received.append(m), token="tok")
+    port = await bridge.start(host="127.0.0.1", port=0)
+    try:
+        first = await websockets.connect(f"ws://127.0.0.1:{port}")
+        await first.send(json.dumps({"type": "hello", "token": "tok"}))
+        await asyncio.sleep(0.05)
+        second = await websockets.connect(f"ws://127.0.0.1:{port}")
+        await second.send(json.dumps({"type": "hello", "token": "tok"}))
+        # The first connection is closed by the bridge when the second takes over, so it can
+        # no longer inject input as a hidden channel.
+        with pytest.raises(websockets.ConnectionClosed):
+            await asyncio.wait_for(first.recv(), timeout=2)
+        await second.send(json.dumps({"type": "input", "text": "north"}))
+        await asyncio.sleep(0.05)
+        assert any(m.get("text") == "north" for m in received)
+        await second.close()
+    finally:
+        await bridge.stop()

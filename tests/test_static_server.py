@@ -82,3 +82,23 @@ def test_symlink_outside_root_is_not_served(tmp_path):
             assert error.code in (403, 404)
     finally:
         server.shutdown()
+
+
+def test_null_byte_in_sounds_url_does_not_crash_the_request(tmp_path):
+    # A "%00" used to reach os.path.realpath, which raises ValueError and reset the
+    # connection. It must now resolve cleanly (the NUL segment is dropped) with a normal
+    # HTTP response, and the server must stay alive for the next request.
+    (tmp_path / "ok.wav").write_bytes(b"RIFF")
+    server = serve_static(str(resource_root() / "frontend"), port=0, sound_root=str(tmp_path))
+    try:
+        _host, port = server.server_address
+        try:
+            with _get(f"http://127.0.0.1:{port}", "/sounds/%00.wav") as response:
+                assert response.status == 200  # a clean response, not a reset connection
+        except urllib.error.HTTPError as error:
+            assert error.code in (403, 404)  # a clean refusal is fine too -- just not a crash
+        # The server survived and still serves a real file.
+        with _get(f"http://127.0.0.1:{port}", "/sounds/ok.wav") as response:
+            assert response.status == 200
+    finally:
+        server.shutdown()

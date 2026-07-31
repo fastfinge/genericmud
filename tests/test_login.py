@@ -119,3 +119,44 @@ def test_on_connect_arms_login(tmp_path):
     app.on_connect("gw")  # packs=None, so this just arms login
     app.on_telnet_event(DataReceived(b"Enter your name: \r\n"))
     assert sent == ["hero"]
+
+
+def test_autologin_name_watch_gives_up_after_a_budget():
+    # If the name prompt never matches (misconfigured/wrong world), stop watching instead
+    # of lurking all session -- else a later in-game "by what name..." line sends the name.
+    sent: list[str] = []
+    login = AutoLogin("hero", "secret", sent.append, max_lines_to_user=5)
+    for _ in range(5):
+        login.feed("some banner or menu line")
+    assert login.done
+    login.feed("By what name do the villagers call you?")  # 500 lines into play
+    assert sent == []
+
+
+def test_autologin_disarms_on_user_input(tmp_path):
+    store = PlaintextCredentialStore(tmp_path / "c.json")
+    store.set("gw", "hero", "secret")
+    app, sent = _app(store)
+    app.begin_login("gw")
+    app._dispatch_command("look")  # the user is driving login/play themselves
+    app.on_telnet_event(DataReceived(b"What is your name?\r\n"))
+    assert "hero" not in sent  # auto-login stood down
+
+
+def test_password_input_is_masked_in_the_log_while_server_echoes(tmp_path):
+    from genericmud.protocol import telnet as T
+
+    backend = RecordingBackend()
+    voice = VoiceRouter(backend, clock=lambda: 0.0)
+    sent: list[str] = []
+    app = EngineApp(voice, send=sent.append, post=[].append, keymap={},
+                    name="gw", log_dir=tmp_path)
+    app._toggle_log()  # start logging
+    app.on_telnet_event(T.Negotiation(T.WILL, T.OPT_ECHO))  # server takes over echo
+    app._dispatch_command("hunter2")  # the password
+    app.on_telnet_event(T.Negotiation(T.WONT, T.OPT_ECHO))  # server releases echo
+    app._dispatch_command("look")
+    log_text = next(app.log_dir.glob("gw-*.log")).read_text(encoding="utf-8")
+    assert "hunter2" not in log_text
+    assert "> ***" in log_text
+    assert "> look" in log_text  # normal input still logged in the clear

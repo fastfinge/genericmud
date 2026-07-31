@@ -47,7 +47,9 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         # Drop '.'/'..'/empty segments, then confirm the result really stays under the root. The
         # filter alone isn't enough: on Windows a drive letter or backslash survives it and escapes
         # os.path.join, and a symlink can point outside -- realpath + containment is the real guard.
-        parts = [p for p in relative.split("/") if p and p not in (".", "..")]
+        # Also drop any segment with a NUL: a "%00" survives unquote and would otherwise reach
+        # os.path.realpath, which raises ValueError and crashes the request instead of 404ing.
+        parts = [p for p in relative.split("/") if p and p not in (".", "..") and "\x00" not in p]
         root = os.path.realpath(base)
         candidate = os.path.realpath(os.path.join(root, *parts))
         if candidate != root and not candidate.startswith(root + os.sep):

@@ -61,4 +61,11 @@ class MCCPState:
         if self._decompressor.unconsumed_tail:
             # More than the cap came out of this one read: real MUD output never does this.
             raise MCCPError("MCCP stream inflated past the per-read cap (possible zlib bomb)")
+        if self._decompressor.eof:
+            # The server ended the zlib stream (MCCP "compress off", a copyover/hotboot).
+            # Anything after the stream end is uncompressed again; without this the dead
+            # decompressor would swallow every later byte and the session goes silent.
+            tail = self._decompressor.unused_data
+            self._decompressor = None
+            return out + tail
         return out

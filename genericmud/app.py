@@ -76,6 +76,18 @@ _REVIEW_VERBS = frozenset(
 _CHANNEL_REVIEW_VERBS = frozenset(
     {"prev", "next", "older", "newer", "prev_word", "next_word"}
 )
+
+
+def _parse_count(text: str) -> int | None:
+    """A recall count from a keymap action, or None if it isn't a number.
+
+    Keymaps are user-editable, so a fat-fingered ``recall:oops`` reaches here; without
+    this guard the int() raised out of key dispatch and the key silently died forever.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        return None
 # Toggles reachable from the keymap: attribute -> what the toggle announces.
 _TOGGLE_ACTIONS = {
     "follow_mode": "follow mode",
@@ -261,6 +273,7 @@ class EngineApp:
         self._client_error_spoken = False  # speak the first renderer error, echo the rest
         self._mush_packs: list[MushclientPack] = []  # loaded MUSHclient packs (hook dispatch)
         self._msdp_offered = False  # server sent WILL MSDP (replayed to late-loading packs)
+        self._input_masked = False  # server WILL ECHO (password entry): don't log/store input
         self._ticks_armed = False  # the OnPluginTick chain is scheduled at most once
         self._closed = False  # ends the tick chain at shutdown
         self._server_latin1 = False  # latched by _decode_server_bytes on invalid UTF-8
@@ -526,6 +539,11 @@ class EngineApp:
             # Server offers MSDP (once per connection, so a reconnect re-arms too).
             self._msdp_offered = True
             self._dispatch_msdp_start()
+        elif isinstance(event, T.Negotiation) and event.option == T.OPT_ECHO:
+            # The server takes over echo (IAC WILL ECHO) right before a password prompt and
+            # releases it (WONT) afterward. While it holds echo, the input is a secret: keep
+            # it out of the session log, the command history, and the autoretype buffer.
+            self._input_masked = event.command == T.WILL
 
     def _decode_server_bytes(self, data: bytes) -> str:
         """Decode server text: UTF-8 first, permanently falling back to CP1252/Latin-1.
@@ -684,8 +702,8 @@ class EngineApp:
         kind = message.get("type")
         if kind == protocol.INPUT:
             text = message.get("text", "")
-            if text.strip():
-                self._last_input = text
+            if text.strip() and not self._input_masked:
+                self._last_input = text  # never park a masked password for autoretype to resend
             elif self.autoretype and self._last_input:
                 # A blank line normally goes to the MUD as-is (pagers use it); with
                 # autoretype on, an empty Enter repeats the last typed input instead.
@@ -748,7 +766,11 @@ class EngineApp:
 
     def _dispatch_command(self, text: str, *, allow_client: bool = True) -> None:
         if text.strip():
-            self._log(f"> {text}")
+            if self._login is not None and not self._login.done:
+                # The user is typing their own login (or already playing): stand down so a
+                # later in-game line can't make auto-login send the stored credentials.
+                self._login.disarm()
+            self._log("> ***" if self._input_masked else f"> {text}")
         if allow_client and self._client_command(text):
             return
         if self._safe_speedwalk(text) or self._speedwalk(text):
@@ -906,9 +928,11 @@ class EngineApp:
         if namespace == "recall":
             # "recall:N" or "recall:<channel>:N" (channel filters the scrollback).
             channel, _, count = argument.rpartition(":")
-            self._speak_review(
-                self.review.recall(int(count), channel=channel or None) or "no message"
-            )
+            n = _parse_count(count)
+            if n is not None:
+                self._speak_review(
+                    self.review.recall(n, channel=channel or None) or "no message"
+                )
         elif namespace == "review" and argument in _REVIEW_VERBS:
             if not self.review.active:
                 self.review.enter()
@@ -977,7 +1001,9 @@ class EngineApp:
         # "chan:prev|next|older|newer|prev_word|next_word" or "chan:recall:N".
         verb, _, count = action.partition(":")
         if verb == "recall":
-            self._speak_review(self.chan_review.recent(int(count)) or "no message")
+            n = _parse_count(count)
+            if n is not None:
+                self._speak_review(self.chan_review.recent(n) or "no message")
         elif verb in _CHANNEL_REVIEW_VERBS:
             self._speak_review(getattr(self.chan_review, self._chan_method(verb))() or "no message")
 
@@ -987,6 +1013,11 @@ class EngineApp:
         return {"prev": "prev_channel", "next": "next_channel"}.get(verb, verb)
 
     def _speak_review(self, text: str) -> None:
+        # A review gesture on an empty buffer (fresh session, failed connect) returns "".
+        # Speaking "" still interrupts, so it would silence the client and announce nothing;
+        # give the user feedback instead. Non-blank lines are the only real content here --
+        # blank server lines are never buffered.
+        text = text or "no message"
         self.voice.speak(text, channel=REVIEW_CHANNEL, interrupt=True)
         self._post(protocol.review(text))
 
@@ -1003,17 +1034,26 @@ class EngineApp:
             # Also mark the engine disconnected: packs read IsConnected(), and the
             # OnPluginTick chain pauses so a tick can't restart music after quit.
             self.engine.connected = False
+            self.engine.cancel_timers()  # a pending #alarm must not fire into a dead session
             self.sound.flush()
         elif message.startswith("reconnected"):
             self.engine.connected = True
+            # A fresh socket is a fresh byte stream: drop any half-decoded multibyte tail and
+            # the legacy-encoding latch, or a drop mid-character mis-decodes the whole reconnect.
+            self._decode_pending = b""
+            self._server_latin1 = False
             # A fresh socket means fresh login prompts; the old AutoLogin is marked done, so
             # re-arm it or a reconnect strands the user at the login screen.
             self.begin_login(self.name)
         self._speak_system(message)
 
     def _log(self, text: str) -> None:
-        if self.logger is not None and self.logger.active:
-            self.logger.log(text)
+        if self.logger is not None and self.logger.active and not self.logger.log(text):
+            # The write failed and logging auto-stopped; say so once rather than let the
+            # fault abort the line (which would silence and drop everything after it).
+            self.voice.speak("Session logging stopped: write failed.", channel="system",
+                             interrupt=True)
+            self._post(protocol.echo("* Session logging stopped: write failed."))
 
     def _toggle_log(self) -> None:
         if self.logger is not None and self.logger.active:

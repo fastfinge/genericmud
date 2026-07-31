@@ -27,13 +27,19 @@ class Line:
     display_when_gagged: bool = False  # gagged from voice but kept visible/reviewable
     ts: float = field(default_factory=time.time)
     spans: list[Span] = field(default_factory=list)  # colour runs; empty if unparsed
+    seq: int = -1  # monotonic all-time position, stamped by Buffer.append (-1 = unbuffered)
 
 
 class Buffer:
     def __init__(self, capacity: int = DEFAULT_CAPACITY) -> None:
         self._lines: deque[Line] = deque(maxlen=capacity)
+        self._appended = 0  # all-time append count; stamps each line's monotonic seq
 
     def append(self, line: Line) -> None:
+        # A monotonic seq lets review cursors anchor to a specific line that survives both
+        # new appends and ring eviction, instead of an absolute index that slides under them.
+        line.seq = self._appended
+        self._appended += 1
         self._lines.append(line)
 
     def lines(self) -> list[Line]:

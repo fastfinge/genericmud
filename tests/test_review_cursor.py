@@ -123,3 +123,31 @@ def test_spell_line_names_spaces_and_separates_characters():
 
 def test_spell_line_on_an_empty_buffer_is_safe():
     assert ReviewCursor(Buffer()).spell_line() == ""
+
+
+def test_position_survives_ring_eviction():
+    # A parked review position must not silently slide onto a newer line once the bounded
+    # buffer fills and starts dropping the oldest lines (the seq anchor, not a raw index).
+    buffer = Buffer(capacity=5)
+    for i in range(5):
+        buffer.append(Line(f"line{i}"))
+    cursor = ReviewCursor(buffer)
+    cursor.enter()
+    assert cursor.top() == "line0"  # parked on the oldest
+    for i in range(5, 8):
+        buffer.append(Line(f"line{i}"))  # evicts line0..line2; buffer is line3..line7
+    # line0 is gone; the cursor clamps to the oldest surviving line, not a slid-to newer one.
+    assert cursor.current_word() == "line3"
+
+
+def test_parked_line_stays_put_as_new_lines_arrive():
+    buffer = Buffer(capacity=100)
+    for i in range(5):
+        buffer.append(Line(f"line{i}"))
+    cursor = ReviewCursor(buffer)
+    cursor.enter()
+    cursor.top()
+    cursor.next_line()  # on line1
+    for i in range(5, 10):
+        buffer.append(Line(f"line{i}"))  # appends, no eviction
+    assert cursor.current_word() == "line1"  # unmoved

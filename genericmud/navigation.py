@@ -40,6 +40,8 @@ def expand_speedwalk(run: str) -> list[str]:
         if match.start() != position:
             return []  # a gap means an unrecognized character -> not a speedwalk
         count = int(match.group(1)) if match.group(1) else 1
+        if count == 0:
+            return []  # "3n0e": a zero-count leg is a typo, not a silent no-op mid-walk
         if count > _MAX_SPEEDWALK_STEPS or len(directions) + count > _MAX_SPEEDWALK_STEPS:
             return []  # absurd repeat count (a typo/paste): refuse before allocating the list
         directions.extend([match.group(2)] * count)

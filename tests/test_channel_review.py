@@ -77,3 +77,16 @@ def test_switching_channels_resets_the_scroll_position():
     review.older()  # at "old chat"
     review.next_channel()  # tell
     assert review.prev_channel() == "chat: new chat"  # back on chat, at the newest again
+
+
+def test_position_does_not_slide_when_new_lines_arrive_on_the_browsed_channel():
+    # Browsing chat history while people keep chatting must not replay already-heard lines:
+    # the viewed line is anchored by seq, not by offset-from-newest.
+    buffer = _buffer(*[("chat", f"m{i}") for i in range(10)])
+    review = ChannelReview(buffer)
+    review.next_channel()  # parks on newest (m9)
+    assert review.older() == "m8"
+    assert review.older() == "m7"
+    buffer.append(Line("m10", channel="chat"))
+    buffer.append(Line("m11", channel="chat"))
+    assert review.older() == "m6"  # steps to the genuinely older line, not back to m8/m9

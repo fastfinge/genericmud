@@ -33,8 +33,16 @@ class ChannelReview:
         self._buffer = buffer
         self._known = known or (lambda: ())
         self._channel: str | None = None
-        self._offset = 0  # lines back from the channel's newest
+        self._seq = -1  # seq of the viewed line; anchors position against new arrivals
         self._word = 0
+
+    def _pos(self, lines: list) -> int:
+        """Index in ``lines`` of the viewed line, by seq — stays on that line as new ones
+        arrive (the old offset-from-newest slid one newer on every same-channel message)."""
+        for i, line in enumerate(lines):
+            if line.seq >= self._seq:
+                return i
+        return len(lines) - 1  # seq past the end (or unset): the newest line
 
     def channels(self) -> list[str]:
         """Browsable channels: seen on buffered lines or declared by policy, sorted."""
@@ -63,7 +71,7 @@ class ChannelReview:
             return "no channel selected"
         if not (1 <= n <= len(lines)):
             return "no message"
-        self._offset = n - 1
+        self._seq = lines[-n].seq
         self._word = 0
         return lines[-n].plain_text
 
@@ -85,28 +93,29 @@ class ChannelReview:
         else:
             index = 0 if step > 0 else len(names) - 1
         self._channel = names[index]
-        self._offset = 0
         self._word = 0
         newest = self._lines()
+        self._seq = newest[-1].seq if newest else -1  # park on the channel's newest line
         latest = newest[-1].plain_text if newest else "no messages"
         return f"{self._channel}: {latest}"
 
     def _scroll(self, step: int) -> str:
+        # step: +1 = older (toward the front), -1 = newer, matching the old offset sense.
         if self._channel is None:
             return self._step_channel(1)  # entering the layer lands on the first channel
         lines = self._lines()
         if not lines:
             return "no messages"
-        self._offset = max(0, min(self._offset + step, len(lines) - 1))
+        index = max(0, min(self._pos(lines) - step, len(lines) - 1))
+        self._seq = lines[index].seq
         self._word = 0
-        return lines[len(lines) - 1 - self._offset].plain_text
+        return lines[index].plain_text
 
     def _current_line(self) -> str:
         lines = self._lines()
         if not lines:
             return ""
-        self._offset = max(0, min(self._offset, len(lines) - 1))
-        return lines[len(lines) - 1 - self._offset].plain_text
+        return lines[self._pos(lines)].plain_text
 
     def _current_word(self) -> str:
         words = self._current_line().split()

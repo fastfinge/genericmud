@@ -45,7 +45,10 @@ async def test_loopback_handshake_and_mccp():
         await writer.drain()
         await asyncio.sleep(0.05)  # allow the client to reply DO before we compress
         writer.write(bytes([T.IAC, T.SB, T.OPT_MCCP2, T.IAC, T.SE]))
-        writer.write(zlib.compress(b"Compressed room\r\n"))
+        # Z_SYNC_FLUSH keeps the stream open the way a real MCCP server does (a Z_FINISH
+        # would legitimately end compression; that path is covered in test_mccp_stream_end).
+        comp = zlib.compressobj()
+        writer.write(comp.compress(b"Compressed room\r\n") + comp.flush(zlib.Z_SYNC_FLUSH))
         await writer.drain()
         await asyncio.sleep(0.05)
         collector.cancel()

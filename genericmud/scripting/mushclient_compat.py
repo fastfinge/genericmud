@@ -139,6 +139,9 @@ class MushclientPack:
         # this state, so a Replace re-registration mutates state instead of stacking a new
         # engine rule per keypress (Erion re-adds its announce triggers on every F-key).
         self._dynamic_triggers: dict[str, dict] = {}
+        self._dyn_counter = 0  # unique engine-rule name per dynamic trigger, so retired ones
+        #                        (deleted / one-shot spent / pattern-replaced) get removed from
+        #                        the engine instead of piling up as dead, still-scanned rules
         # MUSHclient targets Lua 5.1; trusted packs keep the full stdlib their
         # libraries assume (os/io/loadstring + the module(..., package.seeall) idiom).
         self._script_error_spoken = False  # speak the first fire-time script fault, trace the rest
@@ -632,13 +635,24 @@ class MushclientPack:
             "pattern": pattern,
             "regex": regex,
             "name": trigger_name,
+            "retired": False,  # True once its engine rule has been removed (spent/deleted)
         }
         previous = self._dynamic_triggers.get(trigger_name) if trigger_name else None
-        if previous is not None and (previous["pattern"], previous["regex"]) == (pattern, regex):
-            previous.update(state)  # same rule shape: rewire in place, no new engine rule
+        same_shape = previous is not None and (previous["pattern"], previous["regex"]) == (
+            pattern, regex
+        )
+        if previous is not None and not previous["retired"] and same_shape:
+            previous.update(state)  # same live rule: rewire in place, keep the one engine rule
             return _SCRIPT_ERROR_OK
-        if previous is not None:
-            previous["active"] = False  # pattern changed: retire the old rule's callback
+        if previous is not None and not previous["retired"]:
+            # Pattern changed on a still-live rule: retire the callback AND remove its engine
+            # rule, or the dead pattern keeps getting scanned against every line all session.
+            previous["active"] = False
+            previous["retired"] = True
+            self._api.remove_trigger(previous["engine_name"])
+        engine_name = f"mush-dyn-{self._dyn_counter}"
+        self._dyn_counter += 1
+        state["engine_name"] = engine_name
         if trigger_name:
             self._dynamic_triggers[trigger_name] = state
 
@@ -648,6 +662,10 @@ class MushclientPack:
                 return  # replaced by a different rule shape, deleted, or disabled
             if live["one_shot"]:
                 live["active"] = False
+                live["retired"] = True
+                # A spent one-shot is dead: drop its engine rule so churny packs (Erion's
+                # "capture the next line" temporaries) don't accumulate dead rules per line.
+                self._api.remove_trigger(live["engine_name"])
             if live["handler"] is not None:
                 wildcards = self._lua.table_from(ctx.wildcards[1:])
                 self._guard.run(live["handler"], live["name"], ctx.line.plain_text, wildcards)
@@ -660,7 +678,8 @@ class MushclientPack:
                     self._api.send(text)
 
         self._api.add_trigger(
-            pattern, fire, regex=regex, priority=-int(_to_float(sequence) or 100)
+            pattern, fire, regex=regex, priority=-int(_to_float(sequence) or 100),
+            name=engine_name,
         )
         return _SCRIPT_ERROR_OK
 
@@ -669,6 +688,8 @@ class MushclientPack:
         if state is None:
             return 1  # unknown (or XML-defined) trigger: MUSHclient errors, packs shrug
         state["active"] = False
+        state["retired"] = True
+        self._api.remove_trigger(state["engine_name"])  # actually drop it, don't just deactivate
         return _SCRIPT_ERROR_OK
 
     def _enable_trigger(self, name: object = "", enabled: object = 1, *_rest: object) -> int:

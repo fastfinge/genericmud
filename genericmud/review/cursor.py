@@ -17,17 +17,35 @@ RECALL_MAX = 9  # VIPMud recalls the last nine messages via Ctrl+1-9
 class ReviewCursor:
     def __init__(self, buffer: Buffer) -> None:
         self._buffer = buffer
-        self._line = 0
+        self._seq = 0  # all-time seq of the current line; survives appends AND ring eviction
         self._word = 0
         self._char = 0
         self.active = False
+
+    def _index(self) -> int:
+        """The current line's index into the live buffer, derived from its seq.
+
+        Anchoring on seq (not a raw index) is what keeps the position on the line the user
+        parked on: arriving lines don't move it, and once the ring is full and starts
+        evicting, an evicted position clamps to the oldest surviving line instead of
+        silently sliding onto a newer one.
+        """
+        count = len(self._buffer)
+        if count == 0:
+            return 0
+        base = self._buffer[0].seq  # seq of the oldest line still buffered
+        return max(0, min(self._seq - base, count - 1))
+
+    def _set_line(self, index: int) -> None:
+        count = len(self._buffer)
+        self._seq = self._buffer[max(0, min(index, count - 1))].seq if count else 0
 
     # --- line ---
 
     def enter(self) -> str:
         """Enter review at the most recent line; freezes auto-scroll for the caller."""
         self.active = True
-        self._line = max(0, len(self._buffer) - 1)
+        self._set_line(len(self._buffer) - 1)
         self._word = self._char = 0
         return self._line_text()
 
@@ -35,22 +53,22 @@ class ReviewCursor:
         self.active = False
 
     def next_line(self) -> str:
-        self._line += 1
+        self._set_line(self._index() + 1)
         self._word = self._char = 0
         return self._line_text()
 
     def prev_line(self) -> str:
-        self._line -= 1
+        self._set_line(self._index() - 1)
         self._word = self._char = 0
         return self._line_text()
 
     def top(self) -> str:
-        self._line = 0
+        self._set_line(0)
         self._word = self._char = 0
         return self._line_text()
 
     def bottom(self) -> str:
-        self._line = max(0, len(self._buffer) - 1)
+        self._set_line(len(self._buffer) - 1)
         self._word = self._char = 0
         return self._line_text()
 
@@ -117,17 +135,18 @@ class ReviewCursor:
         count = len(self._buffer)
         if count == 0 or not term:
             return ""
+        current = self._index()
         if forward:
-            start = self._line if include_current else self._line + 1
+            start = current if include_current else current + 1
             indices = range(start, count)
         else:
-            start = self._line if include_current else self._line - 1
+            start = current if include_current else current - 1
             indices = range(start, -1, -1)
         needle = term if case_sensitive else term.lower()
         for i in indices:
             haystack = self._buffer[i].plain_text
             if needle in (haystack if case_sensitive else haystack.lower()):
-                self._line = i
+                self._set_line(i)
                 self._word = self._char = 0
                 return self._line_text()
         return ""
@@ -147,5 +166,4 @@ class ReviewCursor:
     def _line_text(self) -> str:
         if len(self._buffer) == 0:
             return ""
-        self._line = max(0, min(self._line, len(self._buffer) - 1))
-        return self._buffer[self._line].plain_text
+        return self._buffer[self._index()].plain_text

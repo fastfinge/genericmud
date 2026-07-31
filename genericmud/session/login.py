@@ -9,6 +9,11 @@ from leaking to the game as a command:
   merely contains the word — a banner like "never share your password" won't fire it,
 * and only within a few lines of the name prompt, so a later in-game line mentioning
   "password" can't trigger a send.
+
+The name prompt is watched only near the start of the connection (a generous line
+budget), and the whole thing disarms the moment the user sends their own input, so an
+in-game line like "by what name do the villagers call you?" can't make it type the
+stored username — or arm the password send — deep into a session.
 """
 
 from __future__ import annotations
@@ -33,6 +38,9 @@ DEFAULT_PASS_PROMPTS = (
     r"^\s*pass(?:word|phrase)\s*$",
 )
 _MAX_LINES_AFTER_USER = 6  # give up watching for the password prompt after this many lines
+# Watch for the name prompt only near connect: covers banners/menus without leaving the
+# credential armed for a later in-game "by what name..." line if the prompt never matched.
+_MAX_LINES_TO_USER = 50
 
 
 class AutoLogin:
@@ -45,6 +53,7 @@ class AutoLogin:
         user_prompts: tuple[str, ...] = DEFAULT_USER_PROMPTS,
         pass_prompts: tuple[str, ...] = DEFAULT_PASS_PROMPTS,
         max_lines: int = _MAX_LINES_AFTER_USER,
+        max_lines_to_user: int = _MAX_LINES_TO_USER,
     ) -> None:
         self._username = username
         self._password = password
@@ -52,15 +61,26 @@ class AutoLogin:
         self._user_prompts = tuple(re.compile(p, re.IGNORECASE) for p in user_prompts)
         self._pass_prompts = tuple(re.compile(p, re.IGNORECASE) for p in pass_prompts)
         self._max_lines = max_lines
+        self._max_lines_to_user = max_lines_to_user
         self._sent_user = False
         self._sent_pass = False
         self._lines_since_user = 0
+        self._lines_before_user = 0
+
+    def disarm(self) -> None:
+        """Stop watching entirely (the user is driving login/play themselves)."""
+        self._sent_user = True
+        self._sent_pass = True
 
     def feed(self, line: str) -> None:
         if not self._sent_user:
             if any(pattern.search(line) for pattern in self._user_prompts):
                 self._send(self._username)
                 self._sent_user = True
+            else:
+                self._lines_before_user += 1
+                if self._lines_before_user >= self._max_lines_to_user:
+                    self.disarm()  # name prompt never came; don't lurk into the session
             return
         if self._sent_pass:
             return

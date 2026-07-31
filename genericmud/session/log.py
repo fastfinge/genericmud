@@ -19,10 +19,22 @@ class SessionLogger:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = open(self._path, "a", encoding="utf-8")
 
-    def log(self, text: str) -> None:
-        if self._handle is not None:
+    def log(self, text: str) -> bool:
+        """Append one line. Returns False and auto-stops if the write fails.
+
+        A write fault (disk full, log dir on removed media) must never propagate: the
+        caller logs a line before speaking and buffering it, so a raised OSError would
+        silence and drop every subsequent line while the connection stays up.
+        """
+        if self._handle is None:
+            return True
+        try:
             self._handle.write(text + "\n")
             self._handle.flush()  # survive a crash; logs are small relative to I/O
+        except (OSError, ValueError):  # disk full / removed media; ValueError = closed handle
+            self.stop()
+            return False
+        return True
 
     def stop(self) -> None:
         if self._handle is not None:

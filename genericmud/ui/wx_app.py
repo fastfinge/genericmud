@@ -419,6 +419,11 @@ class SessionPanel(wx.Panel):
         if code == wx.WXK_F3 and not event.ControlDown() and not event.AltDown():
             self._find_again(reverse=event.ShiftDown())
             return
+        # Route bound keymap combos here too, so the panic keys and other macros work while
+        # the reader is in the output. Plain arrows/typing return no combo (see _key_combo),
+        # so the screen reader's own line/char review of the output is untouched.
+        if self._dispatch_bound_combo(_key_combo(event)):
+            return
         event.Skip()
 
     def _open_find(self) -> None:
@@ -534,19 +539,28 @@ class SessionPanel(wx.Panel):
         if plain and self._prefs.numpad_compass and code in _NUMPAD_COMPASS:
             self._send_command(_NUMPAD_COMPASS[code])
             return
+        if self._dispatch_bound_combo(combo):
+            return
+        event.Skip()  # passthrough/unbound combos -> default handling (Alt+F4 -> EVT_CLOSE)
+
+    def _dispatch_bound_combo(self, combo: str | None) -> bool:
+        """Send a bound keymap/pack combo to the engine; return whether it was consumed.
+
+        Only a combo that's actually bound is consumed -- everything else falls through to
+        wx (swallowing unbound combos is what killed Alt+F menu access keys and the Ctrl
+        accelerators for keyboard-only users). Shared by the command box and the output box
+        so the panic keys (Escape/F11 stop speech, Shift+F11 stop sound) and every other
+        bound action work even while the reader is focused in the output.
+        """
         if (
             combo
             and combo not in _PASSTHROUGH_COMBOS
             and self.app is not None
             and (combo in self._keymap or self.app.engine.has_key(combo))
         ):
-            # Only a combo that's actually bound (keymap action or pack macro) is
-            # consumed. Everything else falls through to wx -- swallowing unbound
-            # combos here is what killed Alt+F menu access keys and the File-menu
-            # Ctrl accelerators for keyboard-only users.
             self._loop.call_soon_threadsafe(self.app.on_ws_message, {"type": "key", "key": combo})
-            return
-        event.Skip()  # passthrough/unbound combos -> default handling (Alt+F4 -> EVT_CLOSE)
+            return True
+        return False
 
     def _send_command(self, command: str) -> None:
         """Send one command through the engine's input path (aliases + breadcrumbs apply)."""
@@ -578,7 +592,12 @@ class SessionPanel(wx.Panel):
                 return
             self._completion.begin(prefix, candidates)
             self._completion_start = start
-            self._completion_tail = text[caret:]
+            # The caret may sit inside a word ("get swo|xx"); replace the WHOLE word, not
+            # graft the completion onto the leftover ("get swordxx" -- a command never heard).
+            rest = text[caret:]
+            boundary = min((i for i in (rest.find(" "), rest.find(";")) if i != -1),
+                           default=len(rest))
+            self._completion_tail = rest[boundary:]
         word = self._completion.prev() if backward else self._completion.next()
         if word is None:
             return
@@ -673,7 +692,12 @@ class SessionPanel(wx.Panel):
             asyncio.create_task(self._connection.close())
         if self.app is not None:
             # A deliberate close is silent (no "disconnected" status fires), so the
-            # status-side flush never runs; cut the pack's looping cues here.
+            # status-side flush never runs; cut the pack's looping cues here. Also mark
+            # the engine disconnected and cancel pending pack timers, or the OnPluginTick
+            # chain restarts the ambience right after this flush and a scheduled #alarm
+            # fires into a dead session.
+            self.app.engine.connected = False
+            self.app.engine.cancel_timers()
             self.app.sound.flush()
 
 
@@ -1082,9 +1106,18 @@ class PackManagerDialog(wx.Dialog):
         if pack_id is None:
             return
         confirm = wx.MessageBox(f"Uninstall {pack_id}?", "Uninstall", wx.YES_NO | wx.ICON_QUESTION)
-        if confirm == wx.YES:
+        if confirm != wx.YES:
+            return
+        try:
             self._store.uninstall(pack_id)
-            self._refresh_packs()
+        except (PackError, OSError) as error:
+            # A pack file held open (its looping music still playing) makes rmtree raise on
+            # Windows; without this the crash vanished into the log and the list looked frozen.
+            wx.MessageBox(f"Couldn't uninstall {pack_id}: {error}", "Uninstall",
+                          wx.OK | wx.ICON_ERROR, self)
+            return
+        self._refresh_packs()
+        wx.MessageBox(f"Uninstalled {pack_id}.", "Uninstall", wx.OK | wx.ICON_INFORMATION, self)
 
     def _on_conflicts(self, _event: wx.CommandEvent) -> None:
         world = self._selected_world()
@@ -1806,27 +1839,50 @@ class RulesBuilderDialog(wx.Dialog):
         dialog.Destroy()
         return result
 
+    # The field each rule kind can't be saved without, and how to name it to the user.
+    _REQUIRED_FIELD = {
+        "trigger": ("pattern", "match text"),
+        "alias": ("pattern", "trigger text"),
+        "key": ("key", "a key"),
+        "channel": ("name", "a name"),
+    }
+
+    def _complete(self, kind: str, rule: object) -> bool:
+        """True if the rule has its required field; else tell the user, don't drop it silently.
+
+        A blank required field used to make New silently discard the whole rule and Edit
+        silently save a dead one -- invisible data loss in the flagship no-code feature.
+        """
+        attr, label = self._REQUIRED_FIELD[kind]
+        if getattr(rule, attr):
+            return True
+        wx.MessageBox(
+            f"Not saved: this {kind} needs {label}.", "Incomplete rule",
+            wx.OK | wx.ICON_INFORMATION, self,
+        )
+        return False
+
     def _on_new_trigger(self, _event: wx.CommandEvent) -> None:
         result = self._edit("trigger", UserTrigger())
-        if result is not None and result.pattern:
+        if result is not None and self._complete("trigger", result):
             self._rules.triggers.append(result)
             self._save_and_reload()
 
     def _on_new_alias(self, _event: wx.CommandEvent) -> None:
         result = self._edit("alias", UserAlias())
-        if result is not None and result.pattern:
+        if result is not None and self._complete("alias", result):
             self._rules.aliases.append(result)
             self._save_and_reload()
 
     def _on_new_key(self, _event: wx.CommandEvent) -> None:
         result = self._edit("key", UserKey())
-        if result is not None and result.key:
+        if result is not None and self._complete("key", result):
             self._rules.keys.append(result)
             self._save_and_reload()
 
     def _on_new_channel(self, _event: wx.CommandEvent) -> None:
         result = self._edit("channel", UserChannel())
-        if result is not None and result.name:
+        if result is not None and self._complete("channel", result):
             self._rules.channels.append(result)
             self._save_and_reload()
 
@@ -1849,7 +1905,7 @@ class RulesBuilderDialog(wx.Dialog):
         kind, index = selected
         items = self._collection(kind)
         result = self._edit(kind, items[index])
-        if result is not None:
+        if result is not None and self._complete(kind, result):
             items[index] = result
             self._save_and_reload()
 
@@ -2046,7 +2102,10 @@ class GenericMudFrame(wx.Frame):
 
         rules_menu = wx.Menu()
         builder_item = rules_menu.Append(wx.ID_ANY, "Soundpack &builder...\tCtrl+B")
-        menubar.Append(rules_menu, "&Rules")
+        # Mnemonic is Alt+U, not Alt+R: the command box binds Alt+R to nav:retrace (a
+        # documented VIPMud nav key), which would otherwise swallow the menu access key and
+        # send the character walking their way back instead of opening this menu.
+        menubar.Append(rules_menu, "R&ules")
 
         self._prefs = load_ui_prefs()
         self._app_focused = True  # tracked via EVT_ACTIVATE for background silence
@@ -2201,10 +2260,24 @@ class GenericMudFrame(wx.Frame):
             dialog.Destroy()
 
     def _save_world(self, world: World, *, replacing: str | None = None) -> bool:
+        existing = load_worlds()
+        # A New World whose name matches a saved one would silently overwrite its host/port/
+        # sounds. Only confirm when it's genuinely a different world being clobbered -- editing
+        # a world in place (replacing == its own name) is not an overwrite.
+        clobbers = world.name.casefold()
+        if clobbers != (replacing or "").casefold() and any(
+            saved.name.casefold() == clobbers for saved in existing
+        ):
+            confirm = wx.MessageBox(
+                f"A saved world named {world.name} already exists. Replace it?",
+                "Replace World", wx.YES_NO | wx.ICON_QUESTION, self,
+            )
+            if confirm != wx.YES:
+                return False
         replaced = {world.name.casefold()}
         if replacing:
             replaced.add(replacing.casefold())
-        worlds = [saved for saved in load_worlds() if saved.name.casefold() not in replaced]
+        worlds = [saved for saved in existing if saved.name.casefold() not in replaced]
         try:
             save_worlds(worlds + [world])
         except (OSError, ValueError) as error:
@@ -2249,6 +2322,12 @@ class GenericMudFrame(wx.Frame):
             self._update_active()
             if self.book.GetPageCount():  # no tab strip to fall back on; place focus
                 self.book.GetPage(self.book.GetSelection()).input.SetFocus()
+            else:
+                # Closing the last tab destroyed the panel that held focus; without this the
+                # screen reader is stranded on a dead window with nothing to read. Focus the
+                # frame (so Alt reaches the menu) and say what happened.
+                self.SetFocus()
+                self.announce("All sessions closed. Press Control N for a new world.")
 
     def _on_export_world(self, _event: wx.CommandEvent) -> None:
         index = self.book.GetSelection()
@@ -2638,6 +2717,9 @@ class GenericMudFrame(wx.Frame):
     def _on_toggle_self_voice(self, _event: wx.CommandEvent) -> None:
         self._self_voice = self._self_voice_item.IsChecked()
         self._update_active()
+        # The most consequential audio switch was the only silent toggle: with self-voice
+        # off there's no MUD speech to confirm the change, so announce it explicitly.
+        self.announce("Self-voice on." if self._self_voice else "Self-voice off.")
 
     def _update_active(self) -> None:
         selected = self.book.GetSelection()

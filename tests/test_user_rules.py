@@ -194,3 +194,24 @@ def test_decode_reads_cp1252_punctuation_not_c1_controls():
     assert app.buffer.lines()[-1].plain_text == "It’s a café"
     app.on_telnet_event(DataReceived(b"\x93quoted\x94\r\n"))  # stays latched, still CP1252
     assert app.buffer.lines()[-1].plain_text == "“quoted”"
+
+
+def test_decode_state_resets_on_reconnect():
+    # A drop mid-multibyte-char latches the legacy fallback; a fresh socket is a fresh
+    # byte stream, so reconnect must clear it or the whole reconnected session mis-decodes.
+    app = _app()
+    app.on_telnet_event(DataReceived(b"caf\xe9\r\n"))  # invalid UTF-8 -> latch
+    assert app._server_latin1 is True
+    app.on_connection_status("reconnected")
+    assert app._server_latin1 is False and app._decode_pending == b""
+    app.on_telnet_event(DataReceived(b"caf\xc3\xa9\r\n"))  # clean UTF-8 read again
+    assert app.buffer.lines()[-1].plain_text == "café"
+
+
+def test_malformed_keymap_recall_count_is_ignored_not_fatal():
+    app = _app()
+    # A user-edited keymap can bind a non-numeric recall; it must no-op, not raise out
+    # of key dispatch and kill the key.
+    app._handle_key("recall:oops")
+    app._handle_key("chan:recall:")
+    app._handle_key("chan:recall:notnum")  # no exception = pass

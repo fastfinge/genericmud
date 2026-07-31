@@ -31,7 +31,9 @@ const handlers = {
   echo: (m) => output.addLine({ text: m.text }),
   sound: (m) => audio.play(m),
   stop_sound: (m) => audio.stop(m.channel),
-  music: (m) => audio.play({ ...m, loop: true, channel: "music" }),
+  // Keep the engine-specified channel (default "music"); hardcoding it collapsed a pack's
+  // custom music channels onto one bus and made stop_sound(<custom>) unable to stop them.
+  music: (m) => audio.play({ ...m, loop: true, channel: m.channel || "music" }),
   status: (m) => status.update(m.gauges),
   review: () => { /* speech is native; visual reflection can be added later */ },
   connected: (m) => { announceEl.textContent = `Connected to ${m.world || "server"}`; },
@@ -39,7 +41,7 @@ const handlers = {
 };
 
 const bridge = new Bridge(port, handlers);
-input = new Input(inputEl, bridge);
+input = new Input(inputEl, bridge, (text) => { announceEl.textContent = text; });
 inputEl.focus();
 
 // Browser autoplay policy: the audio context starts suspended until a gesture.

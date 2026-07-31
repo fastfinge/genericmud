@@ -60,3 +60,45 @@ def test_history_recall_parks_and_restores_the_unsent_draft():
     ).read_text(encoding="utf-8")
     assert "self._history_draft = self.input.GetValue()" in source
     assert "else self._history_draft" in source
+
+
+def _wx_source() -> str:
+    return (
+        Path(__file__).resolve().parents[1] / "genericmud/ui/wx_app.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_bound_combos_dispatch_from_the_output_box_too():
+    # The panic keys (Escape/F11 stop speech, Shift+F11 stop sound) and other macros must
+    # work while the reader is focused in the output, not only in the command box.
+    source = _wx_source()
+    assert "def _dispatch_bound_combo" in source
+    assert source.count("self._dispatch_bound_combo(") >= 2  # input AND output handlers
+
+
+def test_rules_menu_mnemonic_avoids_the_retrace_keymap_binding():
+    # Alt+R is bound to nav:retrace in the command box; the Rules menu must not claim it.
+    source = _wx_source()
+    assert '"R&ules"' in source
+    assert '"&Rules"' not in source
+
+
+def test_builder_validates_required_fields_instead_of_silently_dropping():
+    source = _wx_source()
+    assert "def _complete(self, kind" in source
+    assert "self._complete(kind, result)" in source  # edit path checks too, not just new
+
+
+def test_self_voice_toggle_announces():
+    source = _wx_source()
+    assert '"Self-voice on."' in source
+
+
+def test_closing_last_tab_places_focus_and_announces():
+    source = _wx_source()
+    assert "All sessions closed" in source
+
+
+def test_uninstall_guards_against_file_lock_and_confirms():
+    source = _wx_source()
+    assert "Couldn't uninstall" in source

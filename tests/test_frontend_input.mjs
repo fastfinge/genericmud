@@ -22,9 +22,12 @@ function makeInput() {
   input.bridge = { send: (message) => sent.push(message) };
   input.history = [];
   input.historyIndex = 0;
+  input.historyDraft = "";
+  const announced = [];
+  input.announce = (text) => announced.push(text);
   input.words = [];
   input.completion = null;
-  return { input, sent };
+  return { input, sent, announced };
 }
 
 function keyEvent(key, modifiers = {}) {
@@ -136,4 +139,38 @@ test("browser find shortcuts remain available", () => {
   assert.equal(ctrlF.prevented, false);
   assert.equal(f3.prevented, false);
   assert.deepEqual(sent, []);
+});
+
+test("history recall parks and restores the unsent draft", () => {
+  const { input } = makeInput();
+  input.history = ["look"];
+  input.historyIndex = 1;
+  input.element.value = "tell bob hel";  // typed but unsent
+  input._recallHistory(-1);              // Up -> browse history
+  assert.equal(input.element.value, "look");
+  input._recallHistory(1);               // Down -> back to the draft, not blank
+  assert.equal(input.element.value, "tell bob hel");
+});
+
+test("completion replaces the whole word when the caret is mid-word", () => {
+  const { input } = makeInput();
+  input.addOutput("sword");
+  input.element.value = "get swoxx";
+  input.element.selectionStart = 6;  // caret after "swo", before "xx"
+  input._onKey(keyEvent(" ", { ctrlKey: true }));
+  assert.equal(input.element.value, "get sword");  // not "get swordxx"
+});
+
+test("completion announces the word and no-match to the screen reader", () => {
+  const { input, announced } = makeInput();
+  input.addOutput("goblin");
+  input.element.value = "kill gob";
+  input.element.selectionStart = 8;
+  input._onKey(keyEvent(" ", { ctrlKey: true }));
+  assert.deepEqual(announced, ["goblin"]);
+  input.completion = null;
+  input.element.value = "kill zzz";
+  input.element.selectionStart = 8;
+  input._onKey(keyEvent(" ", { ctrlKey: true }));
+  assert.deepEqual(announced, ["goblin", "no match for zzz"]);
 });

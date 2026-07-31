@@ -17,11 +17,13 @@ const MIN_COMPLETION_WORD_LENGTH = 3;
 const OUTPUT_WORD = /[A-Za-z][A-Za-z'-]+/g;
 
 export class Input {
-  constructor(element, bridge) {
+  constructor(element, bridge, announce) {
     this.element = element;
     this.bridge = bridge;
+    this.announce = announce || (() => {});  // speak UI feedback via the SR live region
     this.history = [];
     this.historyIndex = 0;
+    this.historyDraft = "";  // unsent input, parked while Up browses history
     this.words = [];
     this.completion = null;
     element.closest("form").addEventListener("submit", (e) => {
@@ -36,6 +38,7 @@ export class Input {
     this.bridge.send({ type: "input", text });
     if (text) this.history.push(text);
     this.historyIndex = this.history.length;
+    this.historyDraft = "";
     this.completion = null;
     this.element.value = "";
   }
@@ -80,8 +83,11 @@ export class Input {
 
   _recallHistory(direction) {
     if (!this.history.length) return;
+    if (direction < 0 && this.historyIndex === this.history.length) {
+      this.historyDraft = this.element.value;  // park the unsent draft; Down restores it
+    }
     this.historyIndex = Math.max(0, Math.min(this.history.length, this.historyIndex + direction));
-    this.element.value = this.history[this.historyIndex] ?? "";
+    this.element.value = this.history[this.historyIndex] ?? this.historyDraft;
   }
 
   _complete(backward) {
@@ -91,16 +97,20 @@ export class Input {
       const head = value.slice(0, caret);
       const start = Math.max(head.lastIndexOf(" "), head.lastIndexOf(";")) + 1;
       const prefix = head.slice(start);
-      if (!prefix) return;
+      if (!prefix) { this.announce("nothing to complete"); return; }
       const needle = prefix.toLowerCase();
       const candidates = this.words.filter((word) => {
         const candidate = word.toLowerCase();
         return candidate.startsWith(needle) && candidate !== needle;
       });
-      if (!candidates.length) return;
+      if (!candidates.length) { this.announce(`no match for ${prefix}`); return; }
+      // The caret may sit inside a word; replace the whole word, not graft onto the tail.
+      const rest = value.slice(caret);
+      const bounds = [rest.indexOf(" "), rest.indexOf(";")].filter((i) => i !== -1);
+      const boundary = bounds.length ? Math.min(...bounds) : rest.length;
       this.completion = {
         before: value.slice(0, start),
-        tail: value.slice(caret),
+        tail: rest.slice(boundary),
         candidates,
         index: -1,
       };
@@ -118,6 +128,9 @@ export class Input {
     this.element.value = state.before + word + state.tail;
     const caret = state.before.length + word.length;
     this.element.setSelectionRange(caret, caret);
+    // A programmatic value change is silent to a screen reader in focus mode; speak the
+    // completed word ourselves, mirroring the native client.
+    this.announce(word);
   }
 
   _combo(event) {

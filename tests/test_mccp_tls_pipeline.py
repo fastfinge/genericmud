@@ -36,7 +36,11 @@ def build_stream() -> tuple[bytes, bytes, bytes]:
         + bytes([T.IAC, T.IAC])  # escaped IAC -> single 0xFF
         + b" done\r\n"
     )
-    full = pre + ga + will_gmcp + mccp_start + zlib.compress(inner_wire)
+    # Real MCCP keeps one zlib stream open for the whole session and flushes with
+    # Z_SYNC_FLUSH per chunk (NOT Z_FINISH, which ends the stream — see test_mccp_stream_end).
+    comp = zlib.compressobj()
+    compressed = comp.compress(inner_wire) + comp.flush(zlib.Z_SYNC_FLUSH)
+    full = pre + ga + will_gmcp + mccp_start + compressed
     expected_app = pre + b"You see a room.\r\n" + b"After GMCP" + bytes([T.IAC]) + b" done\r\n"
     return full, expected_app, gmcp_payload
 

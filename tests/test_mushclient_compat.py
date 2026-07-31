@@ -934,3 +934,36 @@ def test_sound_pan_directive_adjusts_the_live_cue(tmp_path):
     sink, engine, bus = _sound_pack(tmp_path)
     engine.process_line(Line("panit"))
     assert bus.adjusted == [("sound", None, -1.0)]
+
+
+def test_dynamic_triggers_do_not_leak_dead_engine_rules(tmp_path):
+    # AddTriggerEx used to register a nameless engine rule that no delete/one-shot/replace
+    # could remove; on a churny pack (Erion's per-line "capture the next line" temporaries)
+    # dead rules accumulated and every one was regex-scanned against every line forever.
+    sink, engine, pack = _make_pack(
+        tmp_path,
+        "<muclient><script><![CDATA[\nfunction noop() end\n]]></script></muclient>",
+    )
+    oneshot = (
+        "bit.bor(trigger_flag.Enabled, trigger_flag.RegularExpression, "
+        "trigger_flag.OneShot)"
+    )
+    for i in range(50):
+        pack._lua.execute(
+            f'AddTriggerEx("t{i}", "^capture {i}$", "", {oneshot}, '
+            'custom_colour.NoChange, 0, "", "noop", 12, 100)'
+        )
+    assert len(engine._triggers) == 50
+    for i in range(50):
+        engine.process_line(Line(f"capture {i}"))  # each one-shot fires once, then retires
+    assert len(engine._triggers) == 0  # every spent one-shot removed itself from the engine
+
+    # An explicit delete also removes the engine rule, not just deactivates it.
+    enabled = "bit.bor(trigger_flag.Enabled, trigger_flag.RegularExpression)"
+    pack._lua.execute(
+        f'AddTriggerEx("keep", "^x$", "", {enabled}, custom_colour.NoChange, 0, "", '
+        '"noop", 12, 100)'
+    )
+    assert len(engine._triggers) == 1
+    pack._lua.execute('DeleteTrigger("keep")')
+    assert len(engine._triggers) == 0

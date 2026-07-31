@@ -48,8 +48,7 @@ class WsBridge:
         # input or receive MUD output). An empty token means unauthenticated (tests/legacy).
         authed = self._token == ""
         if authed:
-            self._ws = ws  # no token configured: last renderer wins, as before
-            self._mark_connected(True)
+            await self._become_renderer(ws)  # no token configured: last renderer wins, as before
         try:
             async for raw in ws:
                 try:
@@ -59,8 +58,7 @@ class WsBridge:
                 if not authed:
                     if message.get("type") == "hello" and message.get("token") == self._token:
                         authed = True
-                        self._ws = ws  # only an authenticated connection becomes the renderer
-                        self._mark_connected(True)
+                        await self._become_renderer(ws)
                         continue
                     await ws.close(code=1008, reason="unauthorized")
                     return
@@ -71,6 +69,22 @@ class WsBridge:
             if self._ws is ws:
                 self._ws = None
                 self._mark_connected(False)
+
+    async def _become_renderer(self, ws: Any) -> None:
+        """Make ``ws`` the active renderer and close any it supersedes.
+
+        A second authenticated page would otherwise keep its receive loop running: it still
+        injected input to the engine while receiving no output -- a confusing silent input
+        channel, and a leaked socket. Closing it makes takeover clean and single-renderer.
+        """
+        previous = self._ws
+        self._ws = ws
+        self._mark_connected(True)
+        if previous is not None and previous is not ws:
+            try:
+                await previous.close(code=1000, reason="superseded")
+            except Exception:  # noqa: BLE001 - the old socket may already be closing
+                pass
 
     def _mark_connected(self, connected: bool) -> None:
         if self._connected is None:
