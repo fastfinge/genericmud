@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write  # needed to publish releases on tags
 
+# A newer push to the same ref cancels an in-progress build instead of piling up runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   macos:
     runs-on: macos-latest
