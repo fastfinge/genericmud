@@ -1,0 +1,70 @@
+name: build-macos
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to publish releases on tags
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install
+        run: pip install ".[gui,voice,audio,package,dev]"
+      - name: Test Python
+        run: python -m pytest -q
+      - name: Test web input
+        run: |
+          node --test tests/test_frontend_input.mjs tests/test_frontend_ws.mjs
+          node --check frontend/src/app.js
+
+      - name: Extract release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python tools/extract_changelog.py CHANGELOG.md "${{ github.ref_name }}" release_notes.md
+          cat release_notes.md
+
+      # Produces dist/genericMud.app (a real bundle VoiceOver drives). --windowed = no
+      # console. Self-voice uses the built-in `say`; screen-reader review uses VoiceOver.
+      - name: Build .app
+        run: python tools/build_app.py
+
+      # Ship the .app inside a zip so GitHub keeps the bundle's exec bits and structure.
+      # ditto is the macOS-native archiver that preserves resource forks/symlinks.
+      - name: Package
+        run: |
+          ditto -c -k --keepParent "dist/genericMud.app" "dist/genericMud-macos.zip"
+          ls -la dist
+      - uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: genericMud-macos
+          path: dist/genericMud-macos.zip
+          retention-days: 14
+
+      # Publish idempotently: whichever platform job reaches the tag first creates the
+      # release, the rest attach their asset. Mirrors build-windows.yml's fallback.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/genericMud-macos.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "genericMud $TAG" \
+            --prerelease \
+            --notes-file release_notes.md \
+          || gh release upload "$TAG" dist/genericMud-macos.zip \
+            --repo "$GITHUB_REPOSITORY" --clobber

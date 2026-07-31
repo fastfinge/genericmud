@@ -9,15 +9,27 @@ as-is, so a pack you already use very likely just works.
 
 ## Getting it running
 
-**Windows (easiest):** download `genericMud-windows.zip` from the
-[Releases page](https://github.com/matalvernaz/genericmud/releases), unzip it
-anywhere, and run `genericMud.exe`. Everything it saves (worlds, soundpacks,
-logs) stays in a `genericmud-data` folder next to the exe, so the folder is
-self-contained and portable. The app checks for new releases itself and offers
-to update in place.
+Download the build for your platform from the
+[Releases page](https://github.com/matalvernaz/genericmud/releases). It reads
+your screen reader on every platform, and self-voices live output through the
+platform's own speech.
 
-**From source** (any platform): see `WINDOWS.md` for the one-click `run.bat`,
-or the "For developers" section below.
+**Windows:** unzip `genericMud-windows.zip` anywhere and run `genericMud.exe`.
+Everything it saves (worlds, soundpacks, logs) stays in a `genericmud-data`
+folder next to the exe, so it's self-contained and portable. Self-voice reads
+through NVDA or JAWS if one is running, or the Windows voice otherwise. The app
+checks for new releases itself and offers to update in place.
+
+**Mac:** unzip `genericMud-macos.zip` and drag `genericMud.app` to Applications.
+Self-voice uses the built-in macOS speech; VoiceOver reads the window as usual.
+Worlds and soundpacks live in `~/Library/Application Support/genericMud`.
+
+**Linux:** untar `genericMud-linux.tar.gz` and run `genericMud` from the folder.
+Self-voice needs `speech-dispatcher` installed (the same speech engine Orca
+uses — `sudo apt install speech-dispatcher`), and Orca reads the window.
+
+**From source** (any platform): `pip install -e '.[gui,voice,audio]'` then run
+`genericmud`, or see the "For developers" section below.
 
 ## Connecting to a MUD
 
@@ -186,5 +198,12 @@ router) with a wxPython native UI, pygame audio, and an alternate web UI
 whole suite runs without a display, socket, or screen reader. Runtime deps:
 `lupa` (Lua) and `regex` (ReDoS-safe matching). Extras: `.[gui]` webview
 shell, `.[voice]` native voice backends, `.[audio]` pygame.
+
+The same wxPython UI runs on all three platforms. Self-voice picks a backend
+per platform: the screen reader (via accessible_output2) or SAPI on Windows,
+`say` on macOS, `speech-dispatcher` on Linux. Build a frozen app for the
+current platform with `python tools/build_app.py` — `.exe` onedir on Windows,
+`genericMud.app` on macOS, an onedir tarball on Linux. CI builds all three on
+tags (`build-windows.yml`, `build-macos.yml`, `build-linux.yml`).
 
 Windows packaging and running from source: `WINDOWS.md`.

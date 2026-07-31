@@ -1,8 +1,9 @@
-"""Pick the best available self-voice backend.
+"""Pick the best available self-voice backend for the platform.
 
-Order: accessible_output2 (routes to the running screen reader — NVDA speaks in the
-user's own voice/settings) > SAPI5 > console print. Constructed on the thread that
-uses it (SAPI is COM, apartment-bound).
+Windows: accessible_output2 (routes to the running screen reader — NVDA speaks in the
+user's own voice/settings) > SAPI5. macOS: the built-in ``say``. Linux: speech-dispatcher
+(``spd-say``, the same engine Orca drives). Console print is the last resort everywhere.
+Constructed on the thread that uses it (SAPI is COM, apartment-bound).
 """
 
 from __future__ import annotations
@@ -43,5 +44,19 @@ def make_voice_backend() -> VoiceBackend:
 
             return SapiBackend()
         except Exception:  # pywin32 / SAPI unavailable
+            pass
+    elif sys.platform == "darwin":
+        try:
+            from genericmud.voice.backends.subprocess_tts import MacSayBackend
+
+            return MacSayBackend()
+        except Exception:  # `say` missing (unheard of on macOS)
+            pass
+    elif sys.platform.startswith("linux"):
+        try:
+            from genericmud.voice.backends.subprocess_tts import SpeechDispatcherBackend
+
+            return SpeechDispatcherBackend()
+        except Exception:  # speech-dispatcher not installed
             pass
     return PrintBackend()

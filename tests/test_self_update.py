@@ -13,6 +13,13 @@ import pytest
 from genericmud.update import self_update
 
 
+@pytest.fixture(autouse=True)
+def _fixed_platform(monkeypatch):
+    # The historical asset tests assert Windows behavior; pin the platform so they pass on
+    # the (Linux) CI/dev host. The per-platform selection is covered explicitly below.
+    monkeypatch.setattr(self_update.sys, "platform", "win32")
+
+
 @pytest.mark.parametrize(
     "tag, expected",
     [
@@ -39,6 +46,20 @@ def test_select_asset_prefers_windows_zip():
 
 def test_select_asset_none_when_absent():
     assert self_update._select_asset([{"name": "notes.txt"}]) is None
+
+
+def test_select_asset_is_platform_specific(monkeypatch):
+    assets = [
+        {"name": "genericMud-windows.zip", "browser_download_url": "w"},
+        {"name": "genericMud-macos.zip", "browser_download_url": "m"},
+        {"name": "genericMud-linux.tar.gz", "browser_download_url": "l"},
+    ]
+    monkeypatch.setattr(self_update.sys, "platform", "darwin")
+    assert self_update._select_asset(assets)["name"] == "genericMud-macos.zip"
+    monkeypatch.setattr(self_update.sys, "platform", "linux")
+    assert self_update._select_asset(assets)["name"] == "genericMud-linux.tar.gz"
+    monkeypatch.setattr(self_update.sys, "platform", "win32")
+    assert self_update._select_asset(assets)["name"] == "genericMud-windows.zip"
 
 
 def _release(tag, *, draft=False, with_asset=True):

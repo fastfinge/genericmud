@@ -45,8 +45,14 @@ def config_dir() -> Path:
     In the shipped (frozen) build this is a folder beside the executable, so the
     whole app is portable: unzip it and everything — including downloaded packs —
     lives in that one directory. From source it's ``~/.genericmud``.
+
+    Exception: a macOS ``.app`` bundle is read-only (and code-signed), so writing beside
+    the executable would land inside ``genericMud.app/Contents/MacOS`` and fail. There we
+    use the platform's per-user data location instead.
     """
     if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            return Path.home() / "Library" / "Application Support" / "genericMud"
         return Path(sys.executable).resolve().parent / "genericmud-data"
     return Path.home() / ".genericmud"
 

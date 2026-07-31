@@ -111,11 +111,21 @@ def _get_json(url: str):
         return json.loads(response.read().decode("utf-8"))
 
 
+def _platform_asset() -> tuple[str, tuple[str, ...]]:
+    """The (name token, allowed extensions) of this platform's release asset."""
+    if sys.platform == "darwin":
+        return "macos", (".zip",)
+    if sys.platform.startswith("linux"):
+        return "linux", (".tar.gz", ".tgz", ".zip")
+    return "windows", (".zip",)
+
+
 def _select_asset(assets: list[dict]) -> dict | None:
-    """The Windows portable zip asset (``genericMud-windows.zip``), or ``None``."""
+    """The release asset for the running platform (windows/macos/linux), or ``None``."""
+    token, extensions = _platform_asset()
     for asset in assets:
         name = asset.get("name", "").lower()
-        if name.endswith(".zip") and "windows" in name:
+        if token in name and name.endswith(extensions):
             return asset
     return None
 
@@ -151,7 +161,8 @@ def check_for_update() -> dict | None:
     asset = _select_asset(release.get("assets") or [])
     if asset is None:
         logger.warning(
-            "Release %s has no Windows zip asset; not offering it.", release.get("tag_name")
+            "Release %s has no asset for this platform; not offering it.",
+            release.get("tag_name"),
         )
         return None
 

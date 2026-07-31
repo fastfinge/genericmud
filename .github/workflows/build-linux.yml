@@ -1,0 +1,82 @@
+name: build-linux
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to publish releases on tags
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      # wxPython and pygame need GTK/audio/X libraries present to import (PyInstaller imports
+      # them at build time) and to run. speech-dispatcher is the self-voice engine (spd-say).
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-0 libgtk-3-dev libnotify4 libsdl2-2.0-0 \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+            speech-dispatcher libspeechd2
+
+      # wxPython has no manylinux wheel; the prebuilt Ubuntu wheel index avoids a long
+      # source build. Falls back to a source build if the runner image isn't matched.
+      - name: Install
+        run: |
+          pip install -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-22.04 \
+            ".[gui,voice,audio,package,dev]"
+
+      - name: Test Python
+        run: xvfb-run -a python -m pytest -q
+      - name: Test web input
+        run: |
+          node --test tests/test_frontend_input.mjs tests/test_frontend_ws.mjs
+          node --check frontend/src/app.js
+
+      - name: Extract release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python tools/extract_changelog.py CHANGELOG.md "${{ github.ref_name }}" release_notes.md
+          cat release_notes.md
+
+      # Produces dist/genericMud/ (portable onedir). --windowed = no console; Orca reads the
+      # GTK controls and self-voice speaks through speech-dispatcher.
+      - name: Build
+        run: xvfb-run -a python tools/build_app.py
+
+      - name: Package
+        run: |
+          tar -C dist -czf dist/genericMud-linux.tar.gz genericMud
+          ls -la dist
+      - uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: genericMud-linux
+          path: dist/genericMud-linux.tar.gz
+          retention-days: 14
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/genericMud-linux.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "genericMud $TAG" \
+            --prerelease \
+            --notes-file release_notes.md \
+          || gh release upload "$TAG" dist/genericMud-linux.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --clobber
