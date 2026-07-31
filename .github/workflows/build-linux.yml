@@ -11,7 +11,9 @@ permissions:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    # Pinned to 22.04 so the runner matches the prebuilt wxPython wheel index below;
+    # on a newer runner pip would fall back to a slow (often failing) source build.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
