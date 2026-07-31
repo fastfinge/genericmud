@@ -304,6 +304,9 @@ class SessionPanel(wx.Panel):
             if self._diag is not None:
                 self._diag.event("connect.ok", host=self.world.host)
             self._post(protocol.echo(f"* Connected to {self.world.name}"))
+            # Speak it too: connect failure and reconnect both speak, so success staying
+            # echo-only was inconsistent and left a quiet MUD's first moment ambiguous.
+            self.app.voice.speak(f"Connected to {self.world.name}.", channel="system")
         except OSError as error:
             if self._diag is not None:
                 self._diag.event("connect.failed", error=str(error))
@@ -962,11 +965,12 @@ class PackManagerDialog(wx.Dialog):
 
     def __init__(
         self, parent: wx.Window, store: PackStore, worlds: list[World], active: str | None,
-        diag=None,
+        diag=None, announce=None,
     ) -> None:
         super().__init__(parent, title="Manage Soundpacks", size=(560, 440))
         self._store = store
         self._diag = diag  # durable install trace (DiagnosticLog or None)
+        self._announce = announce or (lambda _text: None)  # speak the result of an action
         self._ids: list[str] = []  # pack ids, parallel to the list box rows
         self._alive = True  # a late _run_async callback must not touch a destroyed dialog
 
@@ -991,8 +995,8 @@ class PackManagerDialog(wx.Dialog):
         for label, handler in (
             ("&Install file...", self._on_install_file),
             ("Install f&older...", self._on_install_dir),
-            ("Toggle &enabled", self._on_toggle_enabled),
-            ("Toggle &trust", self._on_toggle_trust),
+            ("&Enable or disable", self._on_toggle_enabled),
+            ("&Trust or untrust", self._on_toggle_trust),
             ("&Uninstall", self._on_uninstall),
             ("Check &conflicts", self._on_conflicts),
             ("&Update from source", self._on_update),
@@ -1083,12 +1087,14 @@ class PackManagerDialog(wx.Dialog):
         if pack_id is None:
             return
         if not world:
-            wx.MessageBox("Pick a world first.", "No world", wx.OK | wx.ICON_INFORMATION)
+            wx.MessageBox("Pick a world first.", "No world", wx.OK | wx.ICON_INFORMATION, self)
             return
         if self._store.is_enabled(pack_id, world):
             self._store.disable(pack_id, world)
+            self._announce(f"{pack_id} disabled for {world}.")
         else:
             self._store.enable(pack_id, world)
+            self._announce(f"{pack_id} enabled for {world}.")
         self._refresh_packs()
 
     def _on_toggle_trust(self, _event: wx.CommandEvent) -> None:
@@ -1097,8 +1103,10 @@ class PackManagerDialog(wx.Dialog):
             return
         if self._store.is_trusted(pack_id):
             self._store.untrust(pack_id)
+            self._announce(f"{pack_id} untrusted. Its scripts won't run.")
         else:
             self._store.trust(pack_id)
+            self._announce(f"{pack_id} trusted. Its sounds will play on connect.")
         self._refresh_packs()
 
     def _on_uninstall(self, _event: wx.CommandEvent) -> None:
@@ -1122,19 +1130,18 @@ class PackManagerDialog(wx.Dialog):
     def _on_conflicts(self, _event: wx.CommandEvent) -> None:
         world = self._selected_world()
         if not world:
-            wx.MessageBox("Pick a world first.", "No world", wx.OK | wx.ICON_INFORMATION)
+            wx.MessageBox("Pick a world first.", "No world", wx.OK | wx.ICON_INFORMATION, self)
             return
         result = activate_world(self._store, world, AutomationEngine(), require_trust=False)
-        lines = [f"{len(result.loaded)} pack(s) loaded clean for {world}."]
+        count = len(result.loaded)
+        packs = "pack" if count == 1 else "packs"
+        lines = [f"{count} {packs} loaded with no problems for {world}."]
         for pack_id, error in result.failed.items():
-            lines.append(f"FAILED {pack_id}: {error}")
+            lines.append(f"Couldn't load {pack_id}: {error}")
         for conflict in result.conflicts:
-            lines.append(
-                f"CONFLICT {conflict.kind} {conflict.token} ({', '.join(conflict.sources)})"
-            )
-        if not result.failed and not result.conflicts:
-            lines.append("No load failures or binding conflicts.")
-        wx.MessageBox("\n".join(lines), "Conflicts", wx.OK | wx.ICON_INFORMATION)
+            who = " and ".join(conflict.sources)
+            lines.append(f"{who} both define the {conflict.kind} '{conflict.token}'.")
+        wx.MessageBox("\n".join(lines), "Conflicts", wx.OK | wx.ICON_INFORMATION, self)
 
     def _on_update(self, _event: wx.CommandEvent) -> None:
         pack_id = self._selected_pack()
@@ -1308,9 +1315,10 @@ class VaultBrowserDialog(wx.Dialog):
         self._list.Clear()
         for pack in self._packs:
             version = f" v{pack.version}" if pack.version else ""
-            tag = "" if pack.supported else "  [other client]"
+            tag = "" if pack.supported else " (other client)"
+            # Commas, not dashes: the screen reader reads each " - " as "dash" (see _rule_summary).
             self._list.Append(
-                f"{pack.name} - {pack.mud} - {pack.client}{version} ({pack.status}){tag}"
+                f"{pack.name}, {pack.mud}, {pack.client}{version}, {pack.status}{tag}"
             )
         self._setup_btn.Enable(bool(self._packs))
         return len(self._packs), len(self._all_packs) - len(self._packs)
@@ -1554,9 +1562,15 @@ class _RuleEditorBase(wx.Dialog):
         grid.AddGrowableCol(1)
         return grid
 
+    @staticmethod
+    def _field_name(label: str) -> str:
+        """A spoken control name from a field label (drop the mnemonic & and trailing colon)."""
+        return label.replace("&", "").rstrip(":").strip()
+
     def _text(self, grid: wx.FlexGridSizer, label: str, value: str = "") -> wx.TextCtrl:
         grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
         ctrl = wx.TextCtrl(self, value=value)
+        ctrl.SetName(self._field_name(label))  # NVDA needs the name as well as the label
         grid.Add(ctrl, 1, wx.EXPAND)
         return ctrl
 
@@ -1565,6 +1579,7 @@ class _RuleEditorBase(wx.Dialog):
     ) -> wx.Slider:
         grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
         ctrl = wx.Slider(self, value=value, minValue=low, maxValue=high)
+        ctrl.SetName(self._field_name(label))
         grid.Add(ctrl, 1, wx.EXPAND)
         return ctrl
 
@@ -1630,7 +1645,7 @@ class TriggerEditorDialog(_RuleEditorBase):
             grid, "Route to &channel (optional, e.g. chat):", trigger.channel
         )
         self._stop_channel = self._text(
-            grid, "S&top my cue channel first (optional):", trigger.stop_channel
+            grid, "S&top a looping sound on this channel first (optional):", trigger.stop_channel
         )
         self._finish(outer, grid)
 
@@ -1790,15 +1805,17 @@ class RulesBuilderDialog(wx.Dialog):
     (no wx on the dev host); the rules engine itself is tested headless.
     """
 
-    def __init__(self, parent: wx.Window, panel: SessionPanel) -> None:
+    def __init__(self, parent: wx.Window, panel: SessionPanel, announce=None) -> None:
         super().__init__(parent, title=f"Soundpack builder — {panel.world.name}",
                          size=(640, 480))
         self._panel = panel
+        self._announce = announce or (lambda _text: None)  # speak the result of an action
         self._pack_dir = panel.app.user_rules_dir() if panel.app is not None else None
         self._rules = load_rules(self._pack_dir) if self._pack_dir else UserRules()
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(wx.StaticText(self, label="&Rules:"), 0, wx.LEFT | wx.TOP, 10)
         self._list = wx.ListBox(self)
+        self._list.SetName("Rules")  # NVDA needs the name as well as the preceding label
         outer.Add(self._list, 1, wx.ALL | wx.EXPAND, 10)
         buttons = wx.BoxSizer(wx.HORIZONTAL)
         for label, handler in (
@@ -1856,11 +1873,12 @@ class RulesBuilderDialog(wx.Dialog):
             )
             self._rules = load_rules(self._pack_dir)
             self._refresh()
-            return
+            return False
         panel = self._panel
         if panel.app is not None:
             panel._loop.call_soon_threadsafe(panel.app.reload_user_rules)
         self._refresh()
+        return True
 
     def _edit(self, kind: str, rule):
         if kind == "trigger":
@@ -1898,29 +1916,28 @@ class RulesBuilderDialog(wx.Dialog):
         )
         return False
 
+    # kind -> the word spoken to the user (the list already uses these; "key" is a hotkey).
+    _KIND_WORD = {"trigger": "Trigger", "alias": "Alias", "key": "Hotkey", "channel": "Channel"}
+
+    def _add(self, kind: str, collection: list, result) -> None:
+        """Append a new rule, save, and say what happened (silence read as 'did it save?')."""
+        if result is None or not self._complete(kind, result):
+            return
+        collection.append(result)
+        if self._save_and_reload():
+            self._announce(f"{self._KIND_WORD[kind]} added.")
+
     def _on_new_trigger(self, _event: wx.CommandEvent) -> None:
-        result = self._edit("trigger", UserTrigger())
-        if result is not None and self._complete("trigger", result):
-            self._rules.triggers.append(result)
-            self._save_and_reload()
+        self._add("trigger", self._rules.triggers, self._edit("trigger", UserTrigger()))
 
     def _on_new_alias(self, _event: wx.CommandEvent) -> None:
-        result = self._edit("alias", UserAlias())
-        if result is not None and self._complete("alias", result):
-            self._rules.aliases.append(result)
-            self._save_and_reload()
+        self._add("alias", self._rules.aliases, self._edit("alias", UserAlias()))
 
     def _on_new_key(self, _event: wx.CommandEvent) -> None:
-        result = self._edit("key", UserKey())
-        if result is not None and self._complete("key", result):
-            self._rules.keys.append(result)
-            self._save_and_reload()
+        self._add("key", self._rules.keys, self._edit("key", UserKey()))
 
     def _on_new_channel(self, _event: wx.CommandEvent) -> None:
-        result = self._edit("channel", UserChannel())
-        if result is not None and self._complete("channel", result):
-            self._rules.channels.append(result)
-            self._save_and_reload()
+        self._add("channel", self._rules.channels, self._edit("channel", UserChannel()))
 
     def _selected(self) -> tuple[str, int] | None:
         row = self._list.GetSelection()
@@ -1943,15 +1960,24 @@ class RulesBuilderDialog(wx.Dialog):
         result = self._edit(kind, items[index])
         if result is not None and self._complete(kind, result):
             items[index] = result
-            self._save_and_reload()
+            if self._save_and_reload():
+                self._announce(f"{self._KIND_WORD[kind]} updated.")
 
     def _on_delete(self, _event: wx.CommandEvent) -> None:
         selected = self._selected()
         if selected is None:
             return
         kind, index = selected
+        word = self._KIND_WORD[kind]
+        # Confirm first: the list selection can drift, and there's no undo. (Manage
+        # Soundpacks confirms uninstall the same way.)
+        if wx.MessageBox(
+            f"Delete this {word.lower()}?", "Delete", wx.YES_NO | wx.ICON_QUESTION, self
+        ) != wx.YES:
+            return
         del self._collection(kind)[index]
-        self._save_and_reload()
+        if self._save_and_reload():
+            self._announce(f"{word} deleted.")
 
 
 class HelpDialog(wx.Dialog):
@@ -2116,14 +2142,13 @@ class GenericMudFrame(wx.Frame):
         self._diag = make_diagnostic_log()  # one sound-path trace file for the whole process
 
         menubar = wx.MenuBar()
+        # File is world-level actions; everything about soundpacks lives in one Soundpacks
+        # menu, so a user hunting for pack features doesn't have to guess between two menus.
         file_menu = wx.Menu()
         new_world_item = file_menu.Append(wx.ID_ANY, "&New World...\tCtrl+N")
         connect_item = file_menu.Append(wx.ID_ANY, "&Connect to Saved World...\tCtrl+O")
         disconnect_item = file_menu.Append(wx.ID_ANY, "&Disconnect\tCtrl+D")
         close_item = file_menu.Append(wx.ID_ANY, "Close &Tab\tCtrl+W")
-        packs_item = file_menu.Append(wx.ID_ANY, "&Manage Soundpacks...\tCtrl+P")
-        setup_item = file_menu.Append(wx.ID_ANY, "Set &Up a Soundpack...")
-        browse_item = file_menu.Append(wx.ID_ANY, "&Browse Soundpacks Online...")
         export_item = file_menu.Append(
             wx.ID_ANY, "&Export This World...",
             "Save this world's triggers, sounds, and connection details as one zip to share",
@@ -2136,12 +2161,14 @@ class GenericMudFrame(wx.Frame):
         quit_item = file_menu.Append(wx.ID_EXIT, "E&xit\tCtrl+Q")
         menubar.Append(file_menu, "&File")
 
-        rules_menu = wx.Menu()
-        builder_item = rules_menu.Append(wx.ID_ANY, "Soundpack &builder...\tCtrl+B")
-        # Mnemonic is Alt+U, not Alt+R: the command box binds Alt+R to nav:retrace (a
-        # documented VIPMud nav key), which would otherwise swallow the menu access key and
-        # send the character walking their way back instead of opening this menu.
-        menubar.Append(rules_menu, "R&ules")
+        # Mnemonic Alt+P: doesn't collide with a command-box keymap binding (unlike Alt+R,
+        # which is nav:retrace). Item labels spell out how each install differs.
+        packs_menu = wx.Menu()
+        packs_item = packs_menu.Append(wx.ID_ANY, "&Manage installed soundpacks...\tCtrl+P")
+        browse_item = packs_menu.Append(wx.ID_ANY, "Browse soundpacks &online...")
+        setup_item = packs_menu.Append(wx.ID_ANY, "Set &up a soundpack from a folder...")
+        builder_item = packs_menu.Append(wx.ID_ANY, "Soundpack &builder...\tCtrl+B")
+        menubar.Append(packs_menu, "Sound&packs")
 
         self._prefs = load_ui_prefs()
         self._app_focused = True  # tracked via EVT_ACTIVATE for background silence
@@ -2426,7 +2453,7 @@ class GenericMudFrame(wx.Frame):
         if panel.app is None or panel.app.user_rules_dir() is None:
             self.announce("This session isn't ready yet.")
             return
-        dialog = RulesBuilderDialog(self, panel)
+        dialog = RulesBuilderDialog(self, panel, announce=self.announce)
         dialog.ShowModal()
         dialog.Destroy()
 
@@ -2452,7 +2479,8 @@ class GenericMudFrame(wx.Frame):
 
     def _on_manage_packs(self, _event: wx.CommandEvent) -> None:
         dialog = PackManagerDialog(
-            self, self._packs, load_worlds(), self._active_world_name(), self._diag
+            self, self._packs, load_worlds(), self._active_world_name(), self._diag,
+            announce=self.announce,
         )
         dialog.ShowModal()
         dialog.Destroy()
@@ -2628,7 +2656,7 @@ class GenericMudFrame(wx.Frame):
 
     def _on_setup_pack(self, _event: wx.CommandEvent) -> None:
         """Wizard: pick an extracted pack folder, derive its world, confirm, connect."""
-        with wx.DirDialog(self, "Choose the extracted soundpack folder") as dialog:
+        with wx.DirDialog(self, "Choose an already-unzipped soundpack folder") as dialog:
             if dialog.ShowModal() != wx.ID_OK:
                 return
             folder = dialog.GetPath()
@@ -2748,6 +2776,12 @@ class GenericMudFrame(wx.Frame):
                 self._packs.trust(result.manifest.id)
             self.announce(f"Connecting to {world.name}.")
             self.open_session(world)
+        else:
+            # Cancelling isn't a dead-end: the pack is installed and reachable later.
+            self.announce(
+                f"{result.world.name if result.world else 'The pack'} is set up. "
+                "Connect to it any time from the Connect menu."
+            )
         connect.Destroy()
 
     def _on_toggle_self_voice(self, _event: wx.CommandEvent) -> None:
@@ -2777,6 +2811,14 @@ def run(args, recovery=None) -> None:
     if args.host:
         frame.open_session(
             World(name=args.host, host=args.host, port=args.port, tls=args.tls)
+        )
+    else:
+        # A blank first launch was silent; give a blind user the way in. Deferred so it
+        # speaks after the window is up, not over the screen reader announcing the window.
+        wx.CallAfter(
+            frame.announce,
+            "Welcome to genericMud. Press Control N for a new world, or Control O for a "
+            "saved one. The Help menu has Getting Started.",
         )
     if recovery is not None:  # a prior in-app update was rolled back at startup; tell the user
         wx.CallAfter(frame.show_recovery, recovery)

@@ -90,12 +90,12 @@ Alt+Shift+Left / Right   Review character by character
 Alt+Home / End    Oldest / newest line
 Alt+Shift+Enter   Spell the current line character by character
 Alt+T             Repeat the last tell
+Alt+C             Repeat the last chat line
 
 Finding text (Tab to the output first; these do nothing in the command box):
 Ctrl+F            Find in the output: what to look for, up or down, match case
 F3                Find the next match, same settings
 Shift+F3          Find the previous match
-Alt+C             Repeat the last chat line
 
 Chat channels:
 Ctrl+Alt+Left / Right    Previous / next channel

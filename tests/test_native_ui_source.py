@@ -76,11 +76,13 @@ def test_bound_combos_dispatch_from_the_output_box_too():
     assert source.count("self._dispatch_bound_combo(") >= 2  # input AND output handlers
 
 
-def test_rules_menu_mnemonic_avoids_the_retrace_keymap_binding():
-    # Alt+R is bound to nav:retrace in the command box; the Rules menu must not claim it.
+def test_soundpack_features_live_in_one_menu_clear_of_the_retrace_key():
+    # All pack features are under one "Soundpacks" menu (Alt+P), not split across File and a
+    # "Rules" menu; Alt+R stays free for the nav:retrace command-box binding.
     source = _wx_source()
-    assert '"R&ules"' in source
-    assert '"&Rules"' not in source
+    assert '"Sound&packs"' in source
+    assert '"R&ules"' not in source and '"&Rules"' not in source
+    assert '"Soundpack &builder...\\tCtrl+B"' in source  # builder moved here, keeps Ctrl+B
 
 
 def test_builder_validates_required_fields_instead_of_silently_dropping():
@@ -110,4 +112,23 @@ def test_vault_browser_hides_other_client_packs_behind_a_toggle():
     source = _wx_source()
     assert "show or pack.supported" in source.replace("show_all", "show")
     assert "self._show_all" in source and "wx.CheckBox" in source
-    assert '"&Rules"' not in source  # (sanity: unrelated earlier assertion still holds)
+
+
+def test_pack_manager_and_builder_speak_the_result_of_actions():
+    # Enable/trust/uninstall and add/edit/delete used to be silent; a blind user needs to
+    # hear that the action happened.
+    source = _wx_source()
+    assert "enabled for" in source and "disabled for" in source  # enable/disable toggle
+    assert "trusted. Its sounds will play" in source
+    assert "added." in source and "updated." in source and "deleted." in source  # builder
+    assert 'wx.MessageBox(\n            f"Delete this' in source or "Delete this" in source
+
+
+def test_connection_success_is_spoken_not_just_echoed():
+    source = _wx_source()
+    assert 'self.app.voice.speak(f"Connected to' in source
+
+
+def test_blank_launch_announces_the_way_in():
+    source = _wx_source()
+    assert "Welcome to genericMud" in source

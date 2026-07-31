@@ -90,7 +90,7 @@ def _parse_count(text: str) -> int | None:
 _TOGGLE_ACTIONS = {
     "follow_mode": "follow mode",
     "interrupt_mode": "interrupt mode",
-    "autoretype": "autoretype",
+    "autoretype": "auto-repeat",  # spoken as "auto-repeat on/off" (empty Enter resends last cmd)
 }
 
 
@@ -508,7 +508,10 @@ class EngineApp:
         if result.loaded and triggers == 0:
             parts.append("packs loaded but no triggers registered")
         for pack_id in result.skipped_untrusted:
-            parts.append(f"{pack_id} not loaded, not trusted")
+            parts.append(
+                f"{pack_id} not loaded because it isn't trusted yet — trust it in Manage "
+                "Soundpacks, then reconnect"
+            )
         for pack_id, error in result.failed.items():
             parts.append(f"{pack_id} failed to load: {error}")
         for conflict in result.conflicts:
@@ -1023,6 +1026,7 @@ class EngineApp:
 
     def on_connection_status(self, message: str) -> None:
         """Surface a transport status line (reconnecting, reconnected) to the user."""
+        spoken = message
         if message.startswith(("disconnected", "protocol error", "reconnect failed")):
             # A terminal drop (quit, network death we won't reconnect): silence the pack's
             # looping music/ambience -- nothing will ever stop those cues otherwise. A
@@ -1032,6 +1036,11 @@ class EngineApp:
             self.engine.connected = False
             self.engine.cancel_timers()  # a pending #alarm must not fire into a dead session
             self.sound.flush()
+            if message.startswith("protocol error"):
+                # The raw exception is developer-speak; speak plain language and leave the
+                # detail in the output log (echoed below) for anyone who wants it.
+                spoken = ("Lost connection: the MUD sent data the client couldn't read. "
+                          "Not reconnecting.")
         elif message.startswith("reconnected"):
             self.engine.connected = True
             # A fresh socket is a fresh byte stream: drop any half-decoded multibyte tail and
@@ -1041,7 +1050,8 @@ class EngineApp:
             # A fresh socket means fresh login prompts; the old AutoLogin is marked done, so
             # re-arm it or a reconnect strands the user at the login screen.
             self.begin_login(self.name)
-        self._speak_system(message)
+        self.voice.speak(spoken, channel="system", interrupt=True)
+        self._post(protocol.echo(f"* {message}"))  # raw detail stays reviewable in the output
 
     def _log(self, text: str) -> None:
         if self.logger is not None and self.logger.active and not self.logger.log(text):

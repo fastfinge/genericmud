@@ -26,7 +26,6 @@
 "f11" = "voice:flush"
 "escape" = "voice:flush"
 "shift+f11" = "sound:flush"
-"shift+f1" = "soundpack:toggle"
 
 # Speech ergonomics (announced toggles, persisted across restarts).
 # Follow mode: speech interrupts when YOU move rooms, not on every line.

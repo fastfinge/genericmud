@@ -89,7 +89,8 @@ def test_untrusted_pack_is_announced_and_not_armed(tmp_path):
     app, backend, _posted = _app(store)
     result = app.activate_packs("mud")
     assert result.skipped_untrusted == ["hunt"]
-    assert any("not trusted" in s for s in backend.spoken)
+    # Announced with the fix (trust it in Manage Soundpacks), not just "not trusted".
+    assert any("isn't trusted" in s and "Manage Soundpacks" in s for s in backend.spoken)
 
 
 def test_cli_trust_promotes_a_pack_to_loading(tmp_path, capsys):
