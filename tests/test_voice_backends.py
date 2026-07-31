@@ -16,6 +16,17 @@ from genericmud.voice.backends.subprocess_tts import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_screen_reader(monkeypatch):
+    # accessible_output2 is installed on the Windows and macOS CI runners, so the factory
+    # would return Ao2Backend before the platform branch. Force the screen-reader path to be
+    # unavailable so these tests deterministically exercise the platform TTS selection.
+    def _unavailable(*_a, **_k):
+        raise RuntimeError("no screen reader in test")
+
+    monkeypatch.setattr("genericmud.voice.backends.ao2.Ao2Backend", _unavailable)
+
+
 def test_factory_picks_say_on_macos(monkeypatch):
     monkeypatch.setattr(factory.sys, "platform", "darwin")
     monkeypatch.setattr(subprocess_tts.shutil, "which", lambda _cmd: "/usr/bin/say")
