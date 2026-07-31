@@ -22,6 +22,7 @@ import threading
 from genericmud.voice.backends.base import VoiceBackend
 
 _QUEUE_SENTINEL = None  # pushed by close() to end the worker
+_CANCEL_TIMEOUT_SECONDS = 2  # bound the daemon-cancel subprocess (spd-say -C)
 
 
 class QueuedTtsBackend(VoiceBackend):
@@ -54,7 +55,9 @@ class QueuedTtsBackend(VoiceBackend):
         if self._cancel_command is not None:
             # The daemon keeps speaking after the client exits; cancel it explicitly.
             try:
-                subprocess.run(self._cancel_command, check=False, timeout=2)
+                subprocess.run(
+                    self._cancel_command, check=False, timeout=_CANCEL_TIMEOUT_SECONDS
+                )
             except (OSError, subprocess.SubprocessError):
                 pass
         with self._lock:

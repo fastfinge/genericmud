@@ -106,11 +106,10 @@ export class Input {
       if (!candidates.length) { this.announce(`no match for ${prefix}`); return; }
       // The caret may sit inside a word; replace the whole word, not graft onto the tail.
       const rest = value.slice(caret);
-      const bounds = [rest.indexOf(" "), rest.indexOf(";")].filter((i) => i !== -1);
-      const boundary = bounds.length ? Math.min(...bounds) : rest.length;
+      const wordEnd = rest.search(/[ ;]/);  // -1 if the word runs to the end of the line
       this.completion = {
         before: value.slice(0, start),
-        tail: rest.slice(boundary),
+        tail: wordEnd < 0 ? "" : rest.slice(wordEnd),
         candidates,
         index: -1,
       };

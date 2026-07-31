@@ -56,13 +56,11 @@ _PROMPT_IDLE_FLUSH_SECONDS = 0.25  # emit a newline-less prompt if the server se
 # universally send CP1252, whose curly quotes/dashes live here. Decoding them as Latin-1
 # yields invisible C1 controls a screen reader garbles ("it\x92s"), and any trigger written
 # with the intended punctuation misses. The five bytes CP1252 leaves undefined stay as-is.
-_CP1252_C1_TABLE = str.maketrans(
-    {
-        byte: bytes([byte]).decode("cp1252")
-        for byte in range(0x80, 0xA0)
-        if bytes([byte]).decode("cp1252", "ignore")
-    }
-)
+_CP1252_C1_TABLE = {
+    byte: char
+    for byte in range(0x80, 0xA0)
+    if (char := bytes([byte]).decode("cp1252", "ignore"))  # "" for the 5 undefined bytes
+}
 # Interactive /alias and /trigger register under their own source so the soundpack builder's
 # reload (which clears user_rules.SOURCE) can't silently delete them.
 INTERACTIVE_SOURCE = "user-interactive"
@@ -930,9 +928,7 @@ class EngineApp:
             channel, _, count = argument.rpartition(":")
             n = _parse_count(count)
             if n is not None:
-                self._speak_review(
-                    self.review.recall(n, channel=channel or None) or "no message"
-                )
+                self._speak_review(self.review.recall(n, channel=channel or None))
         elif namespace == "review" and argument in _REVIEW_VERBS:
             if not self.review.active:
                 self.review.enter()
@@ -1003,9 +999,9 @@ class EngineApp:
         if verb == "recall":
             n = _parse_count(count)
             if n is not None:
-                self._speak_review(self.chan_review.recent(n) or "no message")
+                self._speak_review(self.chan_review.recent(n))
         elif verb in _CHANNEL_REVIEW_VERBS:
-            self._speak_review(getattr(self.chan_review, self._chan_method(verb))() or "no message")
+            self._speak_review(getattr(self.chan_review, self._chan_method(verb))())
 
     @staticmethod
     def _chan_method(verb: str) -> str:
