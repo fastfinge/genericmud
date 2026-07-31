@@ -1213,7 +1213,8 @@ class VaultBrowserDialog(wx.Dialog):
         self._announce = announce  # speak status for screen-reader users
         self._diag = diag  # durable install trace (DiagnosticLog or None)
         self._last_milestone = 0  # throttle spoken download progress to 25% steps
-        self._packs: list = []  # VaultPack list, parallel to the list box
+        self._all_packs: list = []  # the full catalogue
+        self._packs: list = []  # the visible subset, parallel to the list box (_selected indexes it)
         self.result = None  # SetupResult once a pack is downloaded + set up
         self._alive = True  # a late download/setup callback must not touch a destroyed dialog
 
@@ -1229,6 +1230,14 @@ class VaultBrowserDialog(wx.Dialog):
         self._list = wx.ListBox(self, style=wx.LB_SINGLE)
         self._list.SetName("Soundpacks")
         sizer.Add(self._list, 1, wx.EXPAND | wx.ALL, 8)
+
+        # Packs for clients genericMud can't load are hidden by default so the list is all
+        # things that actually work here; tick this to see (and try) the rest anyway.
+        self._show_all = wx.CheckBox(
+            self, label="Also show packs for &other clients (may not work here)"
+        )
+        self._show_all.Bind(wx.EVT_CHECKBOX, self._on_toggle_unsupported)
+        sizer.Add(self._show_all, 0, wx.LEFT | wx.BOTTOM, 8)
 
         self._gauge = wx.Gauge(self, range=100)
         sizer.Add(self._gauge, 0, wx.EXPAND | wx.ALL, 8)
@@ -1275,19 +1284,46 @@ class VaultBrowserDialog(wx.Dialog):
         if isinstance(outcome, Exception):
             self._status(f"Couldn't load the catalogue: {outcome}")
             return
-        self._packs = outcome
-        self._list.Clear()
-        for pack in outcome:
-            version = f" v{pack.version}" if pack.version else ""
-            unsupported = "" if pack.supported else "  [unsupported client]"
-            self._list.Append(
-                f"{pack.name} - {pack.mud} - {pack.client}{version} ({pack.status}){unsupported}"
-            )
-        self._status(f"{len(outcome)} soundpacks loaded. Choose one, then Download and Set Up.")
-        if outcome:
+        self._all_packs = outcome
+        shown, hidden = self._populate_list()
+        hint = (
+            f" {hidden} for other clients are hidden — tick Also show packs for other clients "
+            "to see them."
+            if hidden
+            else ""
+        )
+        self._status(f"{shown} soundpacks loaded.{hint} Choose one, then Download and Set Up.")
+        if self._packs:
             self._list.SetSelection(0)
-            self._setup_btn.Enable()
             self._list.SetFocus()
+
+    def _populate_list(self) -> tuple[int, int]:
+        """Rebuild the list box from the catalogue; return (shown, hidden) counts.
+
+        Other-client packs are hidden unless the checkbox is ticked. ``self._packs`` is kept
+        parallel to the list box (the visible rows), since ``_selected`` indexes into it.
+        """
+        show_all = self._show_all.GetValue()
+        self._packs = [pack for pack in self._all_packs if show_all or pack.supported]
+        self._list.Clear()
+        for pack in self._packs:
+            version = f" v{pack.version}" if pack.version else ""
+            tag = "" if pack.supported else "  [other client]"
+            self._list.Append(
+                f"{pack.name} - {pack.mud} - {pack.client}{version} ({pack.status}){tag}"
+            )
+        self._setup_btn.Enable(bool(self._packs))
+        return len(self._packs), len(self._all_packs) - len(self._packs)
+
+    def _on_toggle_unsupported(self, _event: wx.CommandEvent) -> None:
+        shown, _hidden = self._populate_list()
+        others = sum(1 for pack in self._all_packs if not pack.supported)
+        if self._show_all.GetValue():
+            self._status(f"Showing all {shown} packs, including {others} for other clients.")
+        else:
+            self._status(f"Showing {shown} supported packs; {others} for other clients hidden.")
+        if self._packs:
+            self._list.SetSelection(0)
 
     def _selected(self):
         index = self._list.GetSelection()

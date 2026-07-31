@@ -102,3 +102,12 @@ def test_closing_last_tab_places_focus_and_announces():
 def test_uninstall_guards_against_file_lock_and_confirms():
     source = _wx_source()
     assert "Couldn't uninstall" in source
+
+
+def test_vault_browser_hides_other_client_packs_behind_a_toggle():
+    # Unsupported (other-client) packs are filtered out of the list by default, with a
+    # checkbox to reveal them; _populate_list keeps _packs parallel to the visible rows.
+    source = _wx_source()
+    assert "show or pack.supported" in source.replace("show_all", "show")
+    assert "self._show_all" in source and "wx.CheckBox" in source
+    assert '"&Rules"' not in source  # (sanity: unrelated earlier assertion still holds)
