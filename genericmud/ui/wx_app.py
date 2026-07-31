@@ -1214,7 +1214,7 @@ class VaultBrowserDialog(wx.Dialog):
         self._diag = diag  # durable install trace (DiagnosticLog or None)
         self._last_milestone = 0  # throttle spoken download progress to 25% steps
         self._all_packs: list = []  # the full catalogue
-        self._packs: list = []  # the visible subset, parallel to the list box (_selected indexes it)
+        self._packs: list = []  # visible subset, parallel to the list box (what _selected indexes)
         self.result = None  # SetupResult once a pack is downloaded + set up
         self._alive = True  # a late download/setup callback must not touch a destroyed dialog
 
