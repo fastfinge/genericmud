@@ -9,6 +9,9 @@ One runtime (one Lua state) per loaded pack.
 Native callback signature mirrors MUSHclient minus the name:
 ``mud.trigger(pattern, function(line, wildcards) ... end, {regex=true, priority=50})``
 where ``wildcards[1]`` is the first capture.
+
+``mud.command`` accepts one command or a Lua array of commands. ``${1}``/named captures,
+``${script:name}``, and ``${mud:Char.Vitals.hp}`` are expanded before each command is sent.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from lupa import LuaRuntime
 from genericmud.automation.engine import MatchContext
 from genericmud.scripting.api import ScriptApi
 from genericmud.scripting.guard import ScriptGuard, ScriptTimeout
+
+_MAX_COMMANDS_PER_CALL = 100
 
 # Removed from the sandbox: filesystem, process, dynamic code loading, lupa bridge, and
 # coroutines. The loop guard's debug count-hook is per-Lua-thread and is NOT inherited by a
@@ -258,6 +263,7 @@ class LuaPackRuntime:
     def __init__(self, api: ScriptApi) -> None:
         self._api = api
         self._script_error_spoken = False  # speak the first fire-time script fault, trace the rest
+        self._match_context: MatchContext | None = None
         self._lua, install_hook = make_sandboxed_runtime()
         # native packs are sandboxed; report contained faults so a broken trigger isn't silent
         self._guard = ScriptGuard(install_hook, require_hook=True, report=self._report_error)
@@ -275,7 +281,7 @@ class LuaPackRuntime:
         if not self._script_error_spoken:
             self._script_error_spoken = True
             self._api.speak(
-                f"A soundpack script error occurred: {type(error).__name__}", channel="system"
+                f"A Lua script error occurred: {type(error).__name__}", channel="system"
             )
 
     def _install_mud(self) -> None:
@@ -283,6 +289,8 @@ class LuaPackRuntime:
         mud = self._lua.table()
         # ScriptApi methods already carry the right defaults, so bind directly.
         mud.send = api.send
+        mud.execute = api.execute
+        mud.command = self._lua_command()
         mud.echo = api.echo
         mud.speak = api.speak
         mud.play = api.play
@@ -290,6 +298,9 @@ class LuaPackRuntime:
         mud.music = api.music
         mud.get_var = api.get_var
         mud.set_var = api.set_var
+        mud.delete_var = api.delete_var
+        mud.get_mud_var = self._lua_get_mud_var()
+        mud.mud_vars = self._lua_mud_vars()
         mud.set_volume = api.set_volume
         mud.mute = api.mute
         mud.send_to = api.send_to
@@ -300,8 +311,83 @@ class LuaPackRuntime:
         mud.trigger = self._lua_register(api.add_trigger, routable=True)
         mud.alias = self._lua_register(api.add_alias)
         mud.key = self._lua_register_key()
+        mud.timer = self._lua_timer()
         mud.set_channel = self._lua_set_channel()
         self._lua.globals().mud = mud
+
+    def _run_callback(self, callback, ctx: MatchContext | None, *args: object):
+        previous = self._match_context
+        self._match_context = ctx
+        try:
+            return self._guard.run(callback, *args)
+        finally:
+            self._match_context = previous
+
+    def _callback_values(self, overrides=None) -> dict[str, object]:
+        values: dict[str, object] = {}
+        if self._match_context is not None:
+            for index, value in enumerate(self._match_context.wildcards[1:], start=1):
+                values[str(index)] = value
+            values.update(self._match_context.named)
+        if overrides is not None:
+            try:
+                values.update({str(key): value for key, value in overrides.items()})
+            except AttributeError as error:
+                raise TypeError("command variables must be a Lua table") from error
+        return values
+
+    def _lua_command(self):
+        """mud.command(string|{strings}, vars?) -> variable expansion + direct MUD sends."""
+        api = self._api
+
+        def factory(commands, variables=None):
+            if isinstance(commands, str):
+                # Match command-box stacking while also making a multiline Lua string useful.
+                pending = [
+                    part.strip() for line in commands.splitlines() or [commands]
+                    for part in line.split(";") if part.strip()
+                ]
+            else:
+                pending = []
+                for index in range(1, _MAX_COMMANDS_PER_CALL + 2):
+                    command = commands[index]
+                    if command is None:
+                        break
+                    pending.append(str(command).strip())
+                else:
+                    raise ValueError("too many commands")
+            if len(pending) > _MAX_COMMANDS_PER_CALL:
+                raise ValueError(f"too many commands (maximum {_MAX_COMMANDS_PER_CALL})")
+            values = self._callback_values(variables)
+            # Expand the whole stack first. One missing value must not send the first half of a
+            # combat sequence and then abort in the middle.
+            expanded = [api.expand_command(command, values) for command in pending]
+            for command in expanded:
+                if command.strip():
+                    api.send(command)
+
+        return factory
+
+    def _to_lua(self, value: object):
+        if isinstance(value, dict):
+            table = self._lua.table()
+            for key, item in value.items():
+                table[key] = self._to_lua(item)
+            return table
+        if isinstance(value, (list, tuple)):
+            return self._lua.table_from([self._to_lua(item) for item in value])
+        return value
+
+    def _lua_get_mud_var(self):
+        api = self._api
+
+        def factory(name, default=None):
+            return self._to_lua(api.get_mud_var(str(name), default))
+
+        return factory
+
+    def _lua_mud_vars(self):
+        return lambda: self._to_lua(self._api.mud_vars())
 
     def _lua_register(self, register: Callable[..., None], *, routable: bool = False):
         """Build a mud.trigger/mud.alias function that bridges a Lua callback.
@@ -324,7 +410,12 @@ class LuaPackRuntime:
                 return
 
             def py_callback(ctx: MatchContext) -> None:
-                self._guard.run(callback, ctx.line.plain_text, lua.table_from(ctx.wildcards[1:]))
+                captures = lua.table_from(ctx.wildcards[1:])
+                for name, value in ctx.named.items():
+                    captures[name] = value
+                self._run_callback(
+                    callback, ctx, ctx.line.plain_text, captures
+                )
 
             register(pattern, py_callback, **kwargs)
 
@@ -334,10 +425,18 @@ class LuaPackRuntime:
         api = self._api
 
         def factory(key, callback):
-            def py_callback(_ctx: MatchContext) -> None:
-                self._guard.run(callback)
+            def py_callback(ctx: MatchContext) -> None:
+                self._run_callback(callback, ctx)
 
             api.add_key(key, py_callback)
+
+        return factory
+
+    def _lua_timer(self):
+        api = self._api
+
+        def factory(delay, callback):
+            api.add_timer(float(delay), lambda: self._run_callback(callback, None))
 
         return factory
 

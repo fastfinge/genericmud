@@ -41,22 +41,118 @@ the View menu if NVDA needs your numpad). Type .3n2e to speedwalk. Alt+B
 drops a breadcrumb and Alt+R walks you back to it.
 
 Triggers and sounds:
-Ctrl+B opens the soundpack builder. Ctrl+Shift+B browses soundpacks online.
+Ctrl+B opens the visual rule builder. Ctrl+Shift+B browses soundpacks online.
 A trigger watches for text and can play
 a sound, speak, send a command, hide the line, or interrupt speech — the
 simple match is "the line contains this text", no scripting needed. Soundpacks
-menu, Browse soundpacks online fetches ready-made packs.
+menu, Browse soundpacks online fetches ready-made packs. Advanced users can open
+Automation menu, Edit scripts for this world to write sandboxed Lua triggers,
+aliases, timers, and variable-aware command sequences.
 
 Sharing:
 File menu, Export This World saves your whole setup — connection, triggers,
-sounds — as one zip. A friend imports it with File menu, Import a World.
+sounds, and automation scripts — as one zip. A friend imports it with File
+menu, Import a World.
 
 The full shortcut list is under Help, Keyboard Shortcuts.
 """
 
+SCRIPTING = """\
+Automation scripting
+
+Start here:
+Connect to the saved world you want to change. Open the Automation menu and
+choose Edit scripts for this world. Choose New, enter a name such as
+10-combat.lua, and choose Save and reload when you finish.
+
+Scripts belong to one world. They start working as soon as they save. If a save
+has an error, your text stays in the editor and the working script is not
+replaced. Scripts load in alphabetical order.
+
+Your first alias:
+mud.alias("sc", function()
+    mud.command("score")
+end)
+
+Type sc in the command box. The alias sends score to the MUD. function starts
+the action and end finishes it. A line beginning with two dashes is a comment.
+
+A trigger watches text from the MUD:
+mud.trigger("You are hungry", function()
+    mud.speak("Hunger warning", "system", true)
+end)
+
+The final true makes the warning interrupt current speech.
+
+One command or several commands:
+mud.command("look")
+mud.command({"stand", "kill rat", "consider rat"})
+
+A list inside braces is the clearest way to send several commands. A semicolon
+or line break also separates commands. genericMud checks the whole group before
+it sends anything. If a value is missing, none of the commands are sent.
+
+Use mud.send("look") only for one literal command with no variable replacement.
+Use mud.execute("sc") to handle text as if you typed it, including aliases.
+
+Use text caught by a wildcard:
+mud.alias("combo *", function(line, captures)
+    mud.command({"stand", "kill ${1}", "consider ${1}"})
+end)
+
+An asterisk catches any amount of text. The first asterisk is ${1} or
+captures[1]. A question mark catches one character.
+
+Save a script value:
+mud.set_var("attack", "backstab")
+mud.command("${script:attack} ${1}")
+
+mud.get_var("attack", "kill") reads the value and can supply a default.
+mud.delete_var("attack") removes it. Script values are saved for this world and
+shared by its scripts, so use a distinctive name.
+
+Read data sent by the MUD:
+mud.get_mud_var("HEALTH", 0)
+mud.get_mud_var("Char.Vitals.hp", 0)
+mud.command("gt Health is ${mud:Char.Vitals.hp}")
+
+MUD values come from GMCP, MSDP, or MSSP. Their names depend on the game, and
+they are available only after the game sends them. ${mud:HEALTH} selects MUD
+data. ${script:attack} selects a saved script value. ${1} selects a capture.
+
+A temporary Lua value can also be used:
+local victim = captures[1]
+mud.command("consider ${victim}", {victim=victim})
+
+When a name has no prefix, genericMud checks captures and temporary values
+first, saved script values second, and MUD data third. Use script: or mud: when
+you want to make the source clear.
+
+Regular expressions:
+Add {regex=true} after an alias or trigger callback. Named groups such as
+(?P<target>.+) can be read as captures.target or ${target}. Most scripts only
+need the simpler * and ? wildcards.
+
+Other useful calls:
+mud.speak(text), mud.echo(text), mud.play(file), mud.stop(channel)
+mud.key("f2", function() mud.command("score") end)
+mud.timer(2.0, function() mud.command("look") end)
+mud.set_channel(name, {speak=true, display=true, interrupt=false})
+mud.send_to(session, command), mud.broadcast(command), mud.sessions()
+
+Scripts are sandboxed and time-limited. They cannot read arbitrary files, start
+programs, load native code, or use the network directly. Put commands inside an
+alias, trigger, hotkey, or timer. Top-level code also runs while the script is
+being checked and every time it reloads.
+
+The full step-by-step manual, more examples, troubleshooting, and the complete
+API are at:
+github.com/matalvernaz/genericmud/blob/main/docs/scripting.md
+"""
+
 KEYBOARD_SHORTCUTS = """\
 Menus:
-Alt+F File.  Alt+R Rules.  Alt+V View.  Alt+H Help.
+Alt+F File.  Alt+P Soundpacks.  Alt+A Automation.  Alt+V View.  Alt+H Help.
 
 Connection:
 Ctrl+N            Create and connect to a new world
@@ -114,8 +210,9 @@ Alt+S             Stop walking
 
 Tools:
 Ctrl+P            Manage soundpacks
-Ctrl+B            Soundpack builder
+Ctrl+B            Visual rule builder
 Ctrl+Shift+B      Browse soundpacks online
+Automation menu   Edit or reload per-world Lua scripts; open scripting help
 Alt+Shift+L       Log this session to a file
 Alt+Shift+D       Speak the diagnostic log location and summary
 """

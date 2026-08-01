@@ -114,6 +114,10 @@ def _wildcards(match: re.Match[str]) -> list[str]:
     return [match.group(0), *(g if g is not None else "" for g in match.groups())]
 
 
+def _named(match: re.Match[str]) -> dict[str, str]:
+    return {name: value if value is not None else "" for name, value in match.groupdict().items()}
+
+
 class AutomationEngine:
     def __init__(self, sink: EngineSink | None = None, *, sound: SoundBus | None = None) -> None:
         self.sink = sink or EngineSink()
@@ -124,13 +128,18 @@ class AutomationEngine:
         self._key_bindings: list[tuple[str, str, Callback]] = []
         self._vars: dict[str, str] = {}
         self._gvars: dict[str, str] = {}
+        # Latest structured values supplied by the MUD through GMCP/MSDP/MSSP. These stay
+        # separate from script variables: a server update must not overwrite a user's setting,
+        # while ScriptApi can still resolve either namespace for command templates.
+        self._mud_vars: dict[str, object] = {}
         self.channels = ChannelRouter()  # output routing/policy, scriptable via ScriptApi
         self.sound = sound or SoundBus()  # per-category audio mixing, scriptable via ScriptApi
         self.hub: SessionHub | None = None  # cross-session bus (set by the app)
         self.session_name = ""  # this session's name, for broadcast-exclude
         self.connected = True  # transport state, maintained by the app (packs read it)
         self.diag: DiagnosticLog | None = None  # sound-path trace (set by the app)
-        self._timer_handles: list = []  # pending pack-timer handles, cancelled at session close
+        # (handle, source) pairs let a live script reload cancel only the retiring script set.
+        self._timer_handles: list[tuple[object, str]] = []
 
     # --- registration ---
 
@@ -231,6 +240,7 @@ class AutomationEngine:
             # Replay the surviving bindings in order: last writer wins again, and a
             # combo the removed source had shadowed falls back to the earlier owner.
             self._keys = {key: callback for key, _source, callback in self._key_bindings}
+        self.cancel_source_timers(source)
 
     def delete_var(self, name: str) -> None:
         self._vars.pop(name, None)
@@ -245,9 +255,71 @@ class AutomationEngine:
     def set_gvar(self, name: str, value: object) -> None:
         self._gvars[name] = str(value)
 
+    # --- structured MUD variables ---
+
+    @staticmethod
+    def _mapping_item(mapping: dict, name: str) -> tuple[bool, object]:
+        """Case-insensitive mapping lookup while preserving the server's original keys."""
+        if name in mapping:
+            return True, mapping[name]
+        folded = name.casefold()
+        for key, value in mapping.items():
+            if str(key).casefold() == folded:
+                return True, value
+        return False, None
+
+    def set_mud_var(self, name: str, value: object) -> None:
+        """Record one latest GMCP/MSDP/MSSP value under its protocol-provided name."""
+        if not name:
+            return
+        found, _value = self._mapping_item(self._mud_vars, name)
+        if found:
+            # Replace the existing spelling instead of accumulating HEALTH/health duplicates.
+            folded = name.casefold()
+            old_name = next(key for key in self._mud_vars if key.casefold() == folded)
+            self._mud_vars[old_name] = value
+        else:
+            self._mud_vars[name] = value
+
+    def resolve_mud_var(self, name: str) -> tuple[bool, object]:
+        """Resolve ``HEALTH`` or a dotted path such as ``Char.Vitals.hp``.
+
+        GMCP package names already contain dots, so resolution finds the longest matching
+        top-level key first, then walks dictionaries (and zero-based list indexes) below it.
+        """
+        parts = str(name).split(".") if name else []
+        for boundary in range(len(parts), 0, -1):
+            found, value = self._mapping_item(self._mud_vars, ".".join(parts[:boundary]))
+            if not found:
+                continue
+            for part in parts[boundary:]:
+                if isinstance(value, dict):
+                    found, value = self._mapping_item(value, part)
+                    if not found:
+                        return False, None
+                elif isinstance(value, (list, tuple)) and part.isdecimal():
+                    index = int(part)
+                    if index >= len(value):
+                        return False, None
+                    value = value[index]
+                else:
+                    return False, None
+            return True, value
+        return False, None
+
+    def get_mud_var(self, name: str, default: object = None) -> object:
+        found, value = self.resolve_mud_var(name)
+        return value if found else default
+
+    def all_mud_vars(self) -> dict[str, object]:
+        """A shallow snapshot of the latest structured server values."""
+        return dict(self._mud_vars)
+
     # --- timers ---
 
-    def schedule_timer(self, delay: float, callback: Callable[[], None]) -> object | None:
+    def schedule_timer(
+        self, delay: float, callback: Callable[[], None], *, source: str = ""
+    ) -> object | None:
         """Schedule a pack timer through the sink and track its handle.
 
         Tracked so :meth:`cancel_timers` can drop everything still pending at session close;
@@ -256,19 +328,28 @@ class AutomationEngine:
         """
         handle = self.sink.schedule(delay, callback)
         if handle is not None:
-            self._timer_handles.append(handle)
+            self._timer_handles.append((handle, source))
         return handle
 
     def discard_timer(self, handle: object) -> None:
         """Forget a handle once it has fired, so the tracking list can't grow unbounded."""
-        try:
-            self._timer_handles.remove(handle)
-        except ValueError:
-            pass
+        self._timer_handles = [pair for pair in self._timer_handles if pair[0] is not handle]
+
+    def cancel_source_timers(self, source: str) -> None:
+        """Cancel pending timers registered by one retiring script/pack source."""
+        keep: list[tuple[object, str]] = []
+        for handle, handle_source in self._timer_handles:
+            if handle_source != source:
+                keep.append((handle, handle_source))
+                continue
+            cancel = getattr(handle, "cancel", None)
+            if cancel is not None:
+                cancel()
+        self._timer_handles = keep
 
     def cancel_timers(self) -> None:
         """Cancel every still-pending pack timer (session teardown)."""
-        for handle in self._timer_handles:
+        for handle, _source in self._timer_handles:
             cancel = getattr(handle, "cancel", None)
             if cancel is not None:
                 cancel()
@@ -303,7 +384,7 @@ class AutomationEngine:
                 line.gagged = True
                 line.display_when_gagged = rule.gag_but_display
             if rule.callback is not None:
-                rule.callback(MatchContext(line, _wildcards(match), match.groupdict(), self))
+                rule.callback(MatchContext(line, _wildcards(match), _named(match), self))
             if not rule.keep_evaluating:
                 break
         return line
@@ -328,7 +409,7 @@ class AutomationEngine:
             if match is None:
                 continue
             if rule.callback is not None:
-                rule.callback(MatchContext(Line(text), _wildcards(match), match.groupdict(), self))
+                rule.callback(MatchContext(Line(text), _wildcards(match), _named(match), self))
             if not rule.keep_evaluating:
                 return []
         return [text]

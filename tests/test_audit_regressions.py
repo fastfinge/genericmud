@@ -119,6 +119,30 @@ def test_cancel_timers_cancels_pending():
     assert all(h.cancelled for h in handles)
 
 
+def test_remove_source_cancels_only_that_scripts_pending_timers():
+    class _Handle:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    handles: list[_Handle] = []
+
+    class _HandleSink(EngineSink):
+        def schedule(self, delay, callback):
+            handle = _Handle()
+            handles.append(handle)
+            return handle
+
+    engine = AutomationEngine(_HandleSink())
+    ScriptApi(engine, source="old-script").add_timer(1.0, lambda: None)
+    ScriptApi(engine, source="other-script").add_timer(1.0, lambda: None)
+    engine.remove_source("old-script")
+    assert handles[0].cancelled is True
+    assert handles[1].cancelled is False
+
+
 # --- interactive rules vs the soundpack builder (H5, M1) ---
 
 

@@ -33,6 +33,7 @@ from genericmud.render.ansi import parse_ansi
 from genericmud.review.channels import ChannelReview
 from genericmud.review.cursor import ReviewCursor
 from genericmud.safepath import is_unsafe, sanitize_component
+from genericmud.scripting import user_scripts
 from genericmud.scripting.api import ScriptApi
 from genericmud.scripting.mushclient_compat import MushclientPack
 from genericmud.session.credentials import CredentialStore
@@ -270,6 +271,8 @@ class EngineApp:
         self._last_activation: ActivationResult | None = None  # for the diag:where summary
         self._client_error_spoken = False  # speak the first renderer error, echo the rest
         self._mush_packs: list[MushclientPack] = []  # loaded MUSHclient packs (hook dispatch)
+        self._user_script_runtimes: list[user_scripts.LoadedUserScript] = []
+        self._user_script_generation = 0
         self._msdp_offered = False  # server sent WILL MSDP (replayed to late-loading packs)
         self._input_masked = False  # server WILL ECHO (password entry): don't log/store input
         self._ticks_armed = False  # the OnPluginTick chain is scheduled at most once
@@ -307,6 +310,7 @@ class EngineApp:
         # launch silently reset them to defaults.
         self._restore_pack_vars()
         self.reload_user_rules()  # dialog-built rules load alongside installed packs
+        self.reload_user_scripts()
         result = self.activate_packs(world)
         if self._diag is not None:
             # Always emitted, even with zero packs: this is the marker that on_connect
@@ -402,7 +406,7 @@ class EngineApp:
     # --- user rules (the no-code soundpack builder) ---
 
     def user_rules_dir(self) -> Path | None:
-        """This world's user-pack dir (rules.json + copied sounds); None headless."""
+        """This world's user-pack dir (rules, sounds, and scripts); None headless."""
         if self.packs is None or not self.name:
             return None
         root = getattr(self.packs, "root", None)
@@ -438,6 +442,42 @@ class EngineApp:
         user_rules.register_rules(
             ScriptApi(self.engine, source=user_rules.SOURCE, base_dir=str(pack_dir)), rules
         )
+
+    def reload_user_scripts(self, announce: bool = False) -> bool:
+        """Transactionally replace this world's ordered native-Lua automation scripts."""
+        pack_dir = self.user_rules_dir()
+        if pack_dir is None:
+            return False
+        next_generation = self._user_script_generation + 1
+        prefix = f"user-script:{next_generation}"
+        try:
+            loaded = user_scripts.load_scripts(self.engine, pack_dir, source_prefix=prefix)
+        except Exception as error:  # noqa: BLE001 - keep the previous working script set live
+            if self._diag is not None:
+                self._diag.event(
+                    "user_scripts.reload_failed", error=f"{type(error).__name__}: {error}"
+                )
+            self.voice.speak(
+                f"Scripts not applied: {type(error).__name__}: {error}",
+                channel="system", interrupt=False,
+            )
+            return False
+
+        for item in self._user_script_runtimes:
+            self.engine.remove_source(item.source)
+        self._user_script_runtimes = loaded
+        self._user_script_generation = next_generation
+        if self._diag is not None:
+            self._diag.event(
+                "user_scripts.reloaded", count=len(loaded), generation=next_generation
+            )
+        if announce:
+            count = len(loaded)
+            self.voice.speak(
+                f"{count} automation script{'s' if count != 1 else ''} loaded.",
+                channel="system", interrupt=False,
+            )
+        return True
 
     # --- pack-variable persistence (MUSHclient SaveState equivalent) ---
 
@@ -650,6 +690,8 @@ class EngineApp:
             for message in result:
                 if isinstance(message, OobMessage):
                     self._gauges[message.name] = message.value
+                    self.engine.set_mud_var(message.name, message.value)
+                    self.engine.set_mud_var(f"{message.source}.{message.name}", message.value)
                     if message.source == "gmcp":
                         for pack in self._mush_packs:
                             pack.dispatch_gmcp(message.name, message.value)
@@ -659,6 +701,9 @@ class EngineApp:
                 self._post(protocol.status(self._gauges))
         elif isinstance(result, ServerStatus):
             self._gauges.update(result.data)
+            for name, value in result.data.items():
+                self.engine.set_mud_var(name, value)
+                self.engine.set_mud_var(f"mssp.{name}", value)
             self._post(protocol.status(self._gauges))
         if sub.option == T.OPT_MSDP and self._mush_packs:
             self._route_msdp(sub.payload)

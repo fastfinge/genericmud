@@ -9,6 +9,7 @@ dialect authored a rule.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Callable
@@ -31,6 +32,9 @@ _RESERVED_CHANNELS = frozenset({"main", "system", "tell", "review"})
 _MAX_ACTIVE_TIMERS = 1000  # outstanding pack timers; further add_timer calls are refused
 _MIN_TIMER_DELAY = 0.01  # clamp near-zero delays so a self-rearming timer can't busy-spin the loop
 _MAX_VAR_VALUE_LEN = 1_000_000  # 1 MB; a longer var/shared value is refused
+_MAX_EXECUTE_DEPTH = 20  # an alias that executes itself must terminate without recursion overflow
+_COMMAND_VARIABLE_RE = re.compile(r"\$\{([^{}]+)\}")
+_MISSING = object()
 
 
 class ScriptApi:
@@ -43,6 +47,7 @@ class ScriptApi:
         self._sounds_index: dict[str, str] = {}  # basename(lower) -> full path under @sppath
         self._sounds_index_key: str | None = None  # the @sppath the index was built for
         self._active_timers = 0  # pending pack timers, bounded by _MAX_ACTIVE_TIMERS
+        self._execute_depth = 0
 
     @property
     def diag(self):
@@ -62,8 +67,66 @@ class ScriptApi:
         expecting its own alias to consume it -- sending that straight to the server
         gets a spoken "no such command" rejection on every captured line.
         """
-        for out in self._engine.process_input(str(text)):
-            self._engine.sink.send(out)
+        if self._execute_depth >= _MAX_EXECUTE_DEPTH:
+            return
+        self._execute_depth += 1
+        try:
+            for out in self._engine.process_input(str(text)):
+                self._engine.sink.send(out)
+        finally:
+            self._execute_depth -= 1
+
+    def expand_command(self, text: str, values: dict[str, object] | None = None) -> str:
+        """Resolve ``${name}`` placeholders from captures, script vars, or MUD data.
+
+        ``values`` contains callback-local values such as wildcard captures. Unscoped names use
+        callback values first, then persistent script variables, then GMCP/MSDP/MSSP values.
+        ``${script:name}`` and ``${mud:name}`` select a namespace explicitly. Missing values
+        raise instead of sending a potentially destructive half-expanded command.
+        """
+        local_values = {str(key): value for key, value in (values or {}).items()}
+        script_values = self._engine.all_vars()
+
+        def lookup(mapping: dict[str, object], name: str) -> object:
+            if name in mapping:
+                return mapping[name]
+            return _MISSING
+
+        def replace(match: re.Match[str]) -> str:
+            token = match.group(1).strip()
+            scope, separator, name = token.partition(":")
+            if separator and scope == "script":
+                value = lookup(script_values, name)
+            elif separator and scope == "mud":
+                found, value = self._engine.resolve_mud_var(name)
+                if not found:
+                    value = _MISSING
+            else:
+                value = lookup(local_values, token)
+                if value is _MISSING:
+                    value = lookup(script_values, token)
+                if value is _MISSING:
+                    found, value = self._engine.resolve_mud_var(token)
+                    if not found:
+                        value = _MISSING
+            if value is _MISSING:
+                raise ValueError(f"unknown command variable: {token}")
+            if isinstance(value, (dict, list, tuple)):
+                return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+            if isinstance(value, bool):
+                return str(value).lower()
+            return "" if value is None else str(value)
+
+        expanded = _COMMAND_VARIABLE_RE.sub(replace, str(text))
+        if any(char in expanded for char in ("\r", "\n", "\x00")):
+            raise ValueError("expanded command contains a line break or NUL")
+        return expanded
+
+    def send_command(self, text: str, values: dict[str, object] | None = None) -> None:
+        """Expand and send one command directly to the MUD."""
+        command = self.expand_command(text, values)
+        if command.strip():
+            self.send(command)
 
     def send_packet(self, data: bytes) -> None:
         """Send a pre-framed telnet packet verbatim (MUSHclient ``SendPkt``).
@@ -159,6 +222,13 @@ class ScriptApi:
             return
         self._engine.set_gvar(name, value)
 
+    def get_mud_var(self, name: str, default: object = None) -> object:
+        """Latest GMCP/MSDP/MSSP value, including dotted paths into structured data."""
+        return self._engine.get_mud_var(str(name), default)
+
+    def mud_vars(self) -> dict[str, object]:
+        return self._engine.all_mud_vars()
+
     # --- registration ---
 
     def add_trigger(self, pattern: str, callback: Callback, **opts: object) -> None:
@@ -190,7 +260,11 @@ class ScriptApi:
 
         # Track the handle on the engine so session teardown cancels any still-pending timer
         # (a fired one is discarded above), rather than letting it run after the tab closes.
-        handle_box.append(self._engine.schedule_timer(max(delay, _MIN_TIMER_DELAY), wrapped))
+        handle_box.append(
+            self._engine.schedule_timer(
+                max(delay, _MIN_TIMER_DELAY), wrapped, source=self._source
+            )
+        )
 
     def set_channel(
         self,

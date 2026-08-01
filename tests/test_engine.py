@@ -93,6 +93,14 @@ def test_var_and_gvar_fallback():
     assert engine.get_var("realm") == "Erion"
 
 
+def test_structured_mud_variables_resolve_longest_prefix_and_case_insensitively():
+    engine = AutomationEngine()
+    engine.set_mud_var("Char.Vitals", {"HP": 42, "effects": [{"name": "haste"}]})
+    assert engine.get_mud_var("char.vitals.hp") == 42
+    assert engine.get_mud_var("Char.Vitals.effects.0.name") == "haste"
+    assert engine.get_mud_var("Char.Vitals.missing", "fallback") == "fallback"
+
+
 class _RaisingPattern:
     """Stands in for a compiled pattern that blows the per-match timeout budget."""
 

@@ -62,6 +62,78 @@ def test_lua_trigger_with_opts_priority():
     assert engine.get_var("hp") == "73"
 
 
+def test_lua_command_expands_captures_script_vars_and_multiple_commands():
+    sink, engine, runtime = _runtime()
+    runtime.run_source(
+        """
+        mud.set_var("attack", "backstab")
+        mud.alias("combo *", function(line, captures)
+            mud.command({"stand", "${script:attack} ${1}", "consider ${1}"})
+        end)
+        """
+    )
+    assert engine.process_input("combo goblin") == []
+    assert sink.sent == ["stand", "backstab goblin", "consider goblin"]
+
+
+def test_lua_command_expands_named_capture_and_explicit_local_override():
+    sink, engine, runtime = _runtime()
+    runtime.run_source(
+        """
+        mud.alias([[hit (?P<target>.+)]], function(line, captures)
+            local verb = "kick"
+            mud.command(
+                {"${verb} ${target}", "consider ${picked}"},
+                {verb=verb, picked=captures.target}
+            )
+        end, {regex=true})
+        """
+    )
+    engine.process_input("hit rat")
+    assert sink.sent == ["kick rat", "consider rat"]
+
+
+def test_lua_command_and_getter_read_nested_mud_variables():
+    sink, engine, runtime = _runtime()
+    engine.set_mud_var("Char.Vitals", {"hp": 73, "status": {"enemy": "orc"}})
+    runtime.run_source(
+        """
+        mud.command("say ${mud:Char.Vitals.hp}")
+        local vitals = mud.get_mud_var("Char.Vitals")
+        mud.command("consider ${enemy}", {enemy=vitals.status.enemy})
+        """
+    )
+    assert sink.sent == ["say 73", "consider orc"]
+
+
+def test_lua_command_accepts_semicolon_and_multiline_stacks():
+    sink, _, runtime = _runtime()
+    runtime.run_source('mud.command([[stand;score\nlook]])')
+    assert sink.sent == ["stand", "score", "look"]
+
+
+def test_lua_command_expands_whole_stack_before_sending_any_part():
+    sink, _, runtime = _runtime()
+    with pytest.raises((LuaError, ValueError), match="unknown command variable"):
+        runtime.run_source('mud.command({"stand", "kill ${missing}"})')
+    assert sink.sent == []
+
+
+def test_lua_command_rejects_line_breaks_introduced_by_mud_variables():
+    sink, engine, runtime = _runtime()
+    engine.set_mud_var("TARGET", "rat\nquit")
+    with pytest.raises((LuaError, ValueError), match="line break"):
+        runtime.run_source('mud.command({"stand", "kill ${mud:TARGET}"})')
+    assert sink.sent == []
+
+
+def test_lua_execute_self_referential_alias_is_depth_bounded():
+    sink, engine, runtime = _runtime()
+    runtime.run_source('mud.alias("loop", function() mud.execute("loop") end)')
+    assert engine.process_input("loop") == []
+    assert sink.sent == []
+
+
 def test_lua_vars_roundtrip():
     sink, _, runtime = _runtime()
     runtime.run_source('mud.set_var("hp", "42"); mud.echo("hp is " .. mud.get_var("hp"))')
@@ -73,6 +145,14 @@ def test_lua_key_binding():
     runtime.run_source('mud.key("f2", function() mud.send("score") end)')
     assert engine.press_key("f2") is True
     assert sink.sent == ["score"]
+
+
+def test_lua_timer_runs_a_guarded_callback():
+    sink, _, runtime = _runtime()
+    runtime.run_source('mud.timer(0.25, function() mud.command("look") end)')
+    assert sink.scheduled[0][0] == 0.25
+    sink.run_pending()
+    assert sink.sent == ["look"]
 
 
 def test_sandbox_removes_dangerous_globals():

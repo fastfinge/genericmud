@@ -19,6 +19,9 @@ def _pack_dir(tmp_path, rules: str = '{"version": 1, "triggers": []}'):
     sounds = pack / "sounds"
     sounds.mkdir()
     (sounds / "growl.ogg").write_bytes(b"OggS")
+    scripts = pack / "scripts"
+    scripts.mkdir()
+    (scripts / "main.lua").write_text('mud.alias("k", function() mud.send("kill") end)')
     return pack
 
 
@@ -26,7 +29,7 @@ def test_export_then_import_round_trips_rules_sounds_and_connection(tmp_path):
     world = World(name="Aardwolf", host="aardmud.org", port=4000, tls=False)
     dest = tmp_path / "share.zip"
     count = export_world(world, _pack_dir(tmp_path), dest)
-    assert count == 3  # world.json + rules.json + one sound
+    assert count == 4  # world.json + rules.json + one sound + one automation script
 
     userpacks = tmp_path / "userpacks"
     imported = import_world(dest, userpacks)
@@ -34,6 +37,7 @@ def test_export_then_import_round_trips_rules_sounds_and_connection(tmp_path):
     target = userpacks / sanitize_component(imported.name)
     assert (target / "rules.json").is_file()
     assert (target / "sounds" / "growl.ogg").read_bytes() == b"OggS"
+    assert (target / "scripts" / "main.lua").is_file()
 
 
 def test_export_without_a_pack_dir_still_shares_the_connection(tmp_path):
@@ -72,13 +76,17 @@ def test_import_keeps_only_the_known_shapes(tmp_path):
     with zipfile.ZipFile(tricky, "w") as archive:
         archive.writestr("world.json", json.dumps({"name": "Trick", "host": "h", "port": 1}))
         archive.writestr("rules.json", '{"version": 1}')
-        archive.writestr("stray.exe", "MZ")  # not one of the three shapes: dropped
+        archive.writestr("stray.exe", "MZ")  # not one of the four known shapes: dropped
         archive.writestr("sounds/ping.wav", "RIFF")
+        archive.writestr("scripts/main.lua", "-- safe sandboxed automation")
+        archive.writestr("scripts/not-lua.txt", "dropped")
     userpacks = tmp_path / "userpacks"
     world = import_world(tricky, userpacks)
     target = userpacks / sanitize_component(world.name)
     assert (target / "rules.json").is_file()
     assert (target / "sounds" / "ping.wav").is_file()
+    assert (target / "scripts" / "main.lua").is_file()
+    assert not (target / "scripts" / "not-lua.txt").exists()
     assert not (target / "stray.exe").exists()
 
 

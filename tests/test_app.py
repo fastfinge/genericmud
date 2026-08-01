@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from genericmud.app import EngineApp
 from genericmud.config.keymap import load_keymap
-from genericmud.protocol.telnet import GA, OPT_GMCP, Command, DataReceived, Subnegotiation
+from genericmud.protocol.telnet import (
+    GA,
+    OPT_GMCP,
+    OPT_MSDP,
+    Command,
+    DataReceived,
+    Subnegotiation,
+)
 from genericmud.voice.router import VoiceRouter
 from tests.helpers import RecordingBackend
 
@@ -113,6 +120,15 @@ def test_gmcp_subnegotiation_posts_status():
     app, _backend, _sent, posted = _app()
     app.on_telnet_event(Subnegotiation(OPT_GMCP, b'Char.Vitals {"hp":42}'))
     assert any(m["type"] == "status" for m in posted)
+    assert app.engine.get_mud_var("Char.Vitals.hp") == 42
+    assert app.engine.get_mud_var("gmcp.Char.Vitals.hp") == 42
+
+
+def test_msdp_subnegotiation_updates_script_visible_mud_variables():
+    app, _backend, _sent, _posted = _app()
+    app.on_telnet_event(Subnegotiation(OPT_MSDP, b"\x01HEALTH\x0273"))
+    assert app.engine.get_mud_var("HEALTH") == "73"
+    assert app.engine.get_mud_var("msdp.HEALTH") == "73"
 
 
 def test_incoming_text_and_gmcp_are_routed_to_mushclient_plugins():

@@ -76,14 +76,18 @@ def test_bound_combos_dispatch_from_the_output_box_too():
     assert source.count("self._dispatch_bound_combo(") >= 2  # input AND output handlers
 
 
-def test_soundpack_features_live_in_one_menu_clear_of_the_retrace_key():
-    # All pack features are under one "Soundpacks" menu (Alt+P), not split across File and a
-    # "Rules" menu; Alt+R stays free for the nav:retrace command-box binding.
+def test_soundpacks_and_user_automation_have_distinct_menus_clear_of_retrace_key():
+    # Installed packs and user-authored automation are different jobs. Alt+R stays free for
+    # nav:retrace; the new Automation menu uses Alt+A.
     source = _wx_source()
     assert '"Sound&packs"' in source
+    assert '"&Automation"' in source
     assert '"R&ules"' not in source and '"&Rules"' not in source
-    assert '"Soundpack &builder...\\tCtrl+B"' in source  # builder moved here, keeps Ctrl+B
+    assert '"Visual rule &builder...\\tCtrl+B"' in source
+    assert '"Edit &scripts for this world..."' in source
+    assert "AutomationScriptsDialog" in source
     assert '"Browse soundpacks &online...\\tCtrl+Shift+B"' in source
+    assert '"alt+f", "alt+p", "alt+a", "alt+v", "alt+h"' in source
 
 
 def test_builder_validates_required_fields_instead_of_silently_dropping():

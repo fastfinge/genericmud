@@ -7,6 +7,9 @@ output, recalling chat, walking, and building triggers — no scripting needed.
 It's free, and it loads many existing VIPMud `.set` and MUSHclient soundpacks
 as-is, so a pack you already use very likely just works.
 
+The [genericMud manual](docs/README.md) links to the longer guides, including a
+plain-language [scripting and advanced automation guide](docs/scripting.md).
+
 ## Getting it running
 
 Download the build for your platform from the
@@ -100,11 +103,11 @@ main output.
   that share your location with the client. **Alt+S** stops a walk in
   progress.
 - Typing `sh goblin` when you made an alias `sh *` → `shoot %1`? That's in
-  the soundpack builder, next section.
+  the visual rule builder, next section.
 
-## Soundpacks, triggers, and aliases
+## Triggers, aliases, and automation scripts
 
-**Ctrl+B** opens the soundpack builder — the no-scripting way to make the MUD
+**Ctrl+B** opens the visual rule builder — the no-scripting way to make the MUD
 react. A trigger watches for text and can play a sound (with volume and
 stereo position), speak something different, send a command back, hide the
 line, interrupt speech, or file the line under a chat channel. You choose how
@@ -114,6 +117,30 @@ and regular expressions are there when you want them. Aliases shorten what
 you type (`sh *` sends `shoot %1`), and hotkeys bind a key to a command —
 press the key combination you want and it's captured. Everything saves
 immediately and works on the very next line from the MUD.
+
+Advanced automation lives under **Automation → Edit scripts for this world**.
+Create one or more sandboxed Lua files; they load alphabetically and can be
+saved and reloaded without reconnecting. Scripts can define triggers, aliases,
+hotkeys, timers, channels, saved variables, and single or multiple MUD commands.
+For example:
+
+```lua
+mud.alias("combo *", function(line, captures)
+    mud.set_var("target", captures[1])
+    mud.command({"stand", "kill ${script:target}", "consider ${1}"})
+end)
+```
+
+Command templates can combine regex or wildcard captures (`${1}` or a named
+capture), script variables (`${script:target}`), and live MUD protocol data
+such as MSDP `${mud:HEALTH}` or GMCP `${mud:Char.Vitals.hp}`. An unscoped name
+checks captures, then script variables, then MUD variables. A missing value
+stops the whole command group before any part is sent. Read the
+[step-by-step scripting guide](docs/scripting.md) for copyable examples and the
+full API. A shorter reference is available inside the app under
+**Automation → Scripting help**.
+
+## Soundpacks
 
 Ready-made packs: **Soundpacks → Browse soundpacks online** (or
 **Ctrl+Shift+B**) pulls from the
@@ -126,12 +153,14 @@ contain code).
 
 **File → Export This World** saves the world you're on — connection details,
 all your builder triggers, aliases, hotkeys, channels, and every sound file
-they use — as one zip. Send it to a friend; they pick **File → Import a
-World** and the whole thing lands in their Connect dialog, sounds included.
+they use, plus its automation scripts — as one zip. Send it to a friend; they
+pick **File → Import a World** and the whole thing lands in their Connect
+dialog, sounds and scripts included.
 
 ## Every keyboard shortcut
 
-Menus: **Alt+F** File, **Alt+R** Rules, **Alt+V** View, **Alt+H** Help.
+Menus: **Alt+F** File, **Alt+P** Soundpacks, **Alt+A** Automation, **Alt+V**
+View, **Alt+H** Help.
 
 | Keys | What they do |
 | --- | --- |
@@ -165,7 +194,7 @@ Menus: **Alt+F** File, **Alt+R** Rules, **Alt+V** View, **Alt+H** Help.
 | Alt+B / Alt+R | Drop a breadcrumb / retrace to it |
 | Alt+W / Alt+S | Where am I / stop walking |
 | Ctrl+P | Manage soundpacks |
-| Ctrl+B | Soundpack builder |
+| Ctrl+B | Visual rule builder |
 | Ctrl+Shift+B | Browse soundpacks online |
 | Alt+Shift+L | Log this session to a file |
 | Alt+Shift+D | Speak the diagnostic log location and summary |

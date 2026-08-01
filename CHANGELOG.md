@@ -7,6 +7,35 @@ fails the build on purpose.
 
 Entries start at 0.7.1. Earlier releases were tagged before this file existed.
 
+## 0.9.0 — 2026-08-01
+
+**Simple rules and advanced scripts now share one Automation menu**
+
+* Open Automation, then Visual Rule Builder to make an alias, trigger, or hotkey
+  without writing code. Ctrl+B still opens the builder directly.
+* Builder rules and scripts belong to the current world and work alongside
+  installed soundpacks.
+
+**Per-world Lua scripts can handle larger automations**
+
+* Open Automation, then Edit Scripts for This World to create, edit, rename,
+  delete, or reload one or more scripts without reconnecting.
+* An alias, trigger, hotkey, or timer can send one command or a complete command
+  sequence. Commands can combine captured text, saved script values, and current
+  GMCP, MSDP, or MSSP data from the MUD.
+* A missing value stops the whole sequence before anything is sent. A script
+  that does not save or reload correctly leaves the last working version active.
+
+**Scripts are documented, portable, and safe to share**
+
+* Automation, Scripting Help contains an offline introduction. The repository
+  manual adds step-by-step examples, troubleshooting, and the complete scripting
+  reference in plain language.
+* Export This World now includes its Lua scripts. Importing the world restores
+  them with its visual rules and sounds.
+* World scripts run in a time-limited sandbox. They cannot read arbitrary files,
+  start programs, load native code, or connect to the network directly.
+
 ## 0.8.1 — 2026-07-31
 
 **Online soundpacks install from the sources that actually contain them**
