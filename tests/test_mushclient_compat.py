@@ -455,10 +455,10 @@ def test_world_sound_plays():
     assert any(played["file"] == "ding.wav" for played in sink.played)
 
 
-def test_get_info_resolves_sound_path():
-    sink, engine = _load(SOUNDS, base_dir="/packs/demo")
+def test_get_info_resolves_sound_path(tmp_path):
+    sink, engine = _load(SOUNDS, base_dir=str(tmp_path))
     engine.process_line(Line("local"))
-    assert any(played["file"] == "/packs/demo/snd/x.ogg" for played in sink.played)
+    assert any(Path(played["file"]) == tmp_path / "snd" / "x.ogg" for played in sink.played)
 
 
 def test_resolve_keeps_forward_slashes_and_collapses_doubles():
@@ -645,15 +645,16 @@ def test_miriani_bass_module_routes_stream_to_sound_bus(tmp_path):
         "stream:Play()"
         "]]></script></muclient>"
     )
-    assert sink.played == [
-        {
-            "file": str(sound),
-            "channel": "mush-bass-1",
-            "gain": 0.4,
-            "pan": -0.5,
-            "loop": True,
-        }
-    ]
+    assert len(sink.played) == 1
+    played = sink.played[0]
+    assert Path(played["file"]) == sound
+    assert {**played, "file": str(sound)} == {
+        "file": str(sound),
+        "channel": "mush-bass-1",
+        "gain": 0.4,
+        "pan": -0.5,
+        "loop": True,
+    }
 
 
 def test_json_bridge_decodes_and_encodes_without_native_lpeg(tmp_path):
