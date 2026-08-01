@@ -15,4 +15,3 @@ and keeps each change with the version of genericMud it describes.
 The app also includes help that works without an internet connection. Open the
 Help menu for the getting-started page and keyboard shortcuts. Open
 **Automation > Scripting help** for the short scripting reference.
-

@@ -596,4 +596,3 @@ Several open sessions:
 - `mud.broadcast(command)`
 - `mud.shared_get(name)`
 - `mud.shared_set(name, value)`
-
