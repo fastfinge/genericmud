@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 from genericmud.automation.channels import ChannelPolicy
 from genericmud.automation.engine import AutomationEngine, Callback
@@ -107,6 +108,10 @@ class ScriptApi:
         resolved, exists = self._resolve(file)
         self._engine.sink.play(resolved, channel, gain, pan, loop)
         return exists
+
+    def sound_exists(self, file: str) -> bool:
+        """Whether ``file`` currently resolves to a real pack-confined sound file."""
+        return self._resolve(file)[1]
 
     def stop(self, channel: str = "sound") -> None:
         self._engine.sink.stop(channel)
@@ -339,4 +344,11 @@ class ScriptApi:
         exact = self._sounds_index.get(normalized)
         if exact is not None:
             return exact
-        return self._sounds_index.get(normalized.rsplit("/", 1)[-1])
+        leaf = normalized.rsplit("/", 1)[-1]
+        by_name = self._sounds_index.get(leaf)
+        if by_name is not None:
+            return by_name
+        # A few archived packs contain an accidental doubled extension
+        # (``CrossbowFire2.wav.wav``) while their active script requests ``.wav``.
+        suffix = Path(leaf).suffix
+        return self._sounds_index.get(leaf + suffix) if suffix else None

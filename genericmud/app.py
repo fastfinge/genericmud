@@ -617,6 +617,8 @@ class EngineApp:
         plain = "".join(span.text for span in spans)
         if not plain.strip():
             return  # blank line: any sound cues already fired; don't show/speak "blank"
+        for pack in self._mush_packs:
+            pack.dispatch_line(plain)
         line = Line(plain, spans=spans)
         self.engine.process_line(line)  # may set line.channel and gag flags
         self._log(line.plain_text)  # full session log, including gagged-from-speech
@@ -648,6 +650,9 @@ class EngineApp:
             for message in result:
                 if isinstance(message, OobMessage):
                     self._gauges[message.name] = message.value
+                    if message.source == "gmcp":
+                        for pack in self._mush_packs:
+                            pack.dispatch_gmcp(message.name, message.value)
                     if self._is_room_info(message):
                         self._update_room(message.value)
             if result:

@@ -83,6 +83,7 @@ def test_soundpack_features_live_in_one_menu_clear_of_the_retrace_key():
     assert '"Sound&packs"' in source
     assert '"R&ules"' not in source and '"&Rules"' not in source
     assert '"Soundpack &builder...\\tCtrl+B"' in source  # builder moved here, keeps Ctrl+B
+    assert '"Browse soundpacks &online...\\tCtrl+Shift+B"' in source
 
 
 def test_builder_validates_required_fields_instead_of_silently_dropping():
@@ -112,6 +113,28 @@ def test_vault_browser_hides_other_client_packs_behind_a_toggle():
     source = _wx_source()
     assert "show or pack.supported" in source.replace("show_all", "show")
     assert "self._show_all" in source and "wx.CheckBox" in source
+
+
+def test_vault_browser_reports_an_unavailable_source_without_calling_setup_failed():
+    source = _wx_source()
+    assert "isinstance(outcome, vault.SourceUnavailable)" in source
+    assert 'self._status(f"Source unavailable: {outcome}")' in source
+
+
+def test_pack_updates_route_curated_sources_through_their_native_sync():
+    source = _wx_source()
+    assert "manifest_sources.by_id(pack_id)" in source
+    assert "setup_pack_from_manifest(" in source
+    assert "git_sources.by_id(pack_id)" in source
+    assert "setup_pack_from_git(" in source
+
+
+def test_pack_compatibility_dialog_accounts_for_skipped_plugins_and_rules():
+    source = _wx_source()
+    assert '"Check &compatibility"' in source
+    assert "result.skipped_plugins.items()" in source
+    assert "result.skipped_rules.items()" in source
+    assert "result.module_errors.items()" in source
 
 
 def test_pack_manager_and_builder_speak_the_result_of_actions():

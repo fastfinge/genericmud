@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import random
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from genericmud.automation.engine import MatchContext
 from genericmud.model.buffer import Line
@@ -75,6 +77,7 @@ _DEFAULT_VOLUME = 100
 _MASTER_HANDLE = "0"  # VIPMud handle 0 == all cues / master volume
 _MAX_EXEC_DEPTH = 20  # bare-text alias expansion recursion cap (self-invoking alias)
 _PLAY_HANDLE_TOKEN = "%playhandle"
+_REMOTE_SOUND_MAX_BYTES = 32 * 1024 * 1024
 
 
 @dataclass
@@ -443,16 +446,102 @@ class VipMudPack:
         self._next_handle = 1
         self._exec_depth = 0  # bare-text -> alias-pipeline recursion guard
         self._last_handle = _MASTER_HANDLE
+        self._remote_sound_base: str | None = None
+        self._remote_sound_root: Path | None = None
         # Server-controlled packs build sound paths from @sppath; the pack's own
         # settings loader (file I/O, deferred) normally sets it. Default it (and the
         # script path) to the pack dir so @sppath/x.wav resolves to bundled sounds.
         # Default @sppath/@scpath to the pack dir, but don't clobber a value the session
         # pre-set from world.sounds (so a world can point at its own sound folder).
         base = api.base_dir
+        if base:
+            self._discover_remote_sounds(Path(base))
         if base and not api.get_var("sppath"):
-            api.set_var("sppath", base)
+            api.set_var("sppath", self._remote_sound_root or base)
         if base and not api.get_var("scpath"):
             api.set_var("scpath", base)
+
+    def _discover_remote_sounds(self, base: Path) -> None:
+        """Read an official VIPMud installer's lazy sound-repository declaration."""
+        installers = sorted(base.rglob("installer.bat"))
+        for installer in installers:
+            try:
+                source = installer.read_text(encoding="latin-1", errors="ignore")
+            except OSError:
+                continue
+            repo = re.search(r'set\s+"REPO_URL=([^"]+)"', source, re.IGNORECASE)
+            subfolder = re.search(
+                r'set\s+"REPO_SUBFOLDER=([^"]+)"', source, re.IGNORECASE
+            )
+            helper = installer.parent / "SoundSync.exe"
+            if repo is None or subfolder is None or not helper.is_file():
+                continue
+            repo_url = re.sub(r"(?<!:)//+", "/", repo.group(1).strip()).rstrip("/")
+            subtree = subfolder.group(1).strip().strip("/\\")
+            if not repo_url.startswith(("http://", "https://")) or not subtree:
+                continue
+            self._remote_sound_base = f"{repo_url}/raw/branch/main/{quote(subtree)}/"
+            self._remote_sound_root = installer.parent / "sounds" / subtree
+            return
+
+    def _remote_sound_request(self, file: str) -> tuple[Path, str] | None:
+        root = self._remote_sound_root
+        if root is None or self._remote_sound_base is None:
+            return None
+        requested = Path(file.replace("\\", "/"))
+        candidate = requested if requested.is_absolute() else root / requested
+        try:
+            destination = candidate.resolve()
+            root = root.resolve()
+        except OSError:
+            return None
+        if not destination.is_relative_to(root) or destination.suffix.casefold() != ".wav":
+            return None
+        relative = destination.relative_to(root).as_posix()
+        url = self._remote_sound_base + quote(relative, safe="/")
+        return destination, url
+
+    def can_fetch_sound(self, file: str) -> bool:
+        """Whether this pack declares a confined online source for the requested WAV."""
+        return self._remote_sound_request(file) is not None
+
+    def _fetch_remote_sound(self, file: str) -> bool:
+        request = self._remote_sound_request(file)
+        if request is None:
+            return False
+        destination, url = request
+        root = self._remote_sound_root
+        assert root is not None
+        relative = destination.relative_to(root.resolve()).as_posix()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, prefix=".genericmud-sound-", delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+            from genericmud.packs import vault
+
+            vault.download(url, temporary, max_bytes=_REMOTE_SOUND_MAX_BYTES)
+            if temporary.stat().st_size == 0:
+                return False
+            temporary.replace(destination)
+            if self._api.diag is not None:
+                self._api.diag.event(
+                    "pack.sound.fetch", source=self._api.source or "?",
+                    file=relative, status="downloaded",
+                )
+            return True
+        except Exception as error:  # noqa: BLE001 - the pack handles a failed play normally
+            if self._api.diag is not None:
+                self._api.diag.event(
+                    "pack.sound.fetch", source=self._api.source or "?",
+                    file=relative, status="failed", error=f"{type(error).__name__}: {error}",
+                )
+            return False
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def load_source(self, source: str) -> None:
         for command, args in tokenize_statements(source):
@@ -664,6 +753,8 @@ class VipMudPack:
 
     def _play(self, args: list[_Tok], wildcards: list[str], *, loop: bool) -> None:
         file = _expand_sound_variant(self._subst(args[0].text, wildcards))
+        if not self._api.sound_exists(file):
+            self._fetch_remote_sound(file)
         volume = _DEFAULT_VOLUME
         if len(args) > 1:
             volume = _to_int(self._subst(args[1].text, wildcards), _DEFAULT_VOLUME)

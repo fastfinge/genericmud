@@ -39,10 +39,10 @@ class ManifestSource:
         return self.base_url + self.manifest_name
 
 
-# Alter Aeon's connection is www.alteraeon.com's telnet endpoint (from the pack's own world
-# file); the tree also bundles a Stellar Aeon world, so the connection is curated here rather
-# than read out of the pack. include=() = fetch the whole tree (the pack's plugins `require`
-# libs across the install; trimming to a subtree is a later optimisation, not correctness).
+# The current tree ships no Alter Aeon world file; its runnable entry is the core AlterAeon
+# plugin. It also bundles a Stellar Aeon world, so the connection is curated here rather than
+# inferred from that unrelated `.MCL`. include=() fetches the whole tree because the core plugin
+# requires libraries spread across the install.
 _SOURCES: dict[str, ManifestSource] = {
     "mush-z": ManifestSource(
         id="mush-z",
@@ -51,8 +51,21 @@ _SOURCES: dict[str, ManifestSource] = {
         dialect="mushclient",
         base_url="https://www.mush-z.com/mush/",
         manifest_name="update_everything.lst.gz",
-        entry="worlds/alteraeon/alter_aeon.mcl",
+        entry="worlds/plugins/AlterAeon.xml",
         world=World(name="Alter Aeon", host="alteraeon.com", port=3010),
+    ),
+    # Stellarmush's installer is only a bootstrapper for this updater tree. The remote
+    # manifest omits the saved world but includes the runnable core sound plugin, which loads
+    # its own required plugins and avoids importing MUSHclient's unrelated shell components.
+    "stellarmush": ManifestSource(
+        id="stellarmush",
+        name="Stellarmush",
+        mud="stellaraeon",
+        dialect="mushclient",
+        base_url="https://update.xirr.com/stellar_aeon/stellarmush-stable/",
+        manifest_name="update_everything.lst.gz",
+        entry="worlds/plugins/stellarAeon/soundpackSA.xml",
+        world=World(name="Stellar Aeon", host="stellaraeon.com", port=4010),
     ),
 }
 

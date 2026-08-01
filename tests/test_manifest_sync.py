@@ -6,11 +6,13 @@ import gzip
 import hashlib
 from urllib.parse import unquote
 
+import pytest
+
 from genericmud.config.worlds import World
 from genericmud.packs import manifest_sync
 from genericmud.packs.manifest_sources import ManifestSource
 from genericmud.packs.setup import setup_pack_from_manifest
-from genericmud.packs.store import PackStore
+from genericmud.packs.store import PackError, PackStore
 
 
 def _digest(data: bytes) -> str:
@@ -78,6 +80,16 @@ def test_sync_fresh_install_downloads_everything(tmp_path):
     assert (tmp_path / manifest_sync._BASELINE_NAME).is_file()  # baseline committed
 
 
+def test_sync_without_baseline_resumes_completed_atomic_files(tmp_path):
+    files = {"worlds/w.mcl": b"world", "sounds/hit.ogg": b"sound"}
+    source, download = _make(files)
+    (tmp_path / "worlds").mkdir()
+    (tmp_path / "worlds/w.mcl").write_bytes(b"world")
+    result = manifest_sync.sync(source, tmp_path, download=download)
+    assert result.downloaded == 1
+    assert result.skipped_unchanged == 1
+
+
 def test_sync_incremental_fetches_only_changed(tmp_path):
     files = {"worlds/w.mcl": b"<world/>", "sounds/hit.ogg": b"old"}
     source, download = _make(files)
@@ -117,6 +129,28 @@ def test_sync_size_mismatch_fails_and_withholds_baseline(tmp_path):
     assert not (tmp_path / manifest_sync._BASELINE_NAME).exists()  # baseline withheld on failure
 
 
+def test_sync_rejects_an_html_manifest_without_touching_installed_files(tmp_path):
+    files = {"worlds/w.mcl": b"<world/>", "sounds/hit.ogg": b"sound"}
+    source, download = _make(files)
+    manifest_sync.sync(source, tmp_path, download=download)
+    baseline = (tmp_path / manifest_sync._BASELINE_NAME).read_bytes()
+
+    def html_manifest(_url, dest, **_kwargs):
+        dest.write_bytes(b"<html>upstream error</html>")
+
+    with pytest.raises(ValueError, match="no valid file entries"):
+        manifest_sync.sync(source, tmp_path, download=html_manifest)
+    assert (tmp_path / "sounds/hit.ogg").read_bytes() == b"sound"
+    assert (tmp_path / manifest_sync._BASELINE_NAME).read_bytes() == baseline
+
+
+def test_sync_rejects_a_manifest_missing_its_configured_entry(tmp_path):
+    source, download = _make({"sounds/hit.ogg": b"sound"})
+    with pytest.raises(ValueError, match="configured entry"):
+        manifest_sync.sync(source, tmp_path, download=download)
+    assert not (tmp_path / "sounds/hit.ogg").exists()
+
+
 def test_sync_include_filter_limits_the_subtree(tmp_path):
     files = {"worlds/w.mcl": b"world", "sounds/a.ogg": b"snd", "docs/readme.txt": b"skip me"}
     source, download = _make(files, include=("worlds/", "sounds/"))
@@ -141,6 +175,15 @@ def test_setup_pack_from_manifest_registers_enabled_but_untrusted(tmp_path):
     assert (store.pack_dir("testpack") / "sounds/hit.ogg").read_bytes() == b"snd"
 
 
+def test_setup_pack_from_manifest_does_not_register_a_partial_sync(tmp_path):
+    files = {"worlds/w.mcl": b"<world/>", "sounds/hit.ogg": b"123"}
+    source, download = _make(files, sizes={"sounds/hit.ogg": 999})
+    store = PackStore(tmp_path / "store")
+    with pytest.raises(PackError, match="sync was incomplete"):
+        setup_pack_from_manifest(store, source, download=download)
+    assert store.installed() == []
+
+
 def test_mush_z_source_uses_https():
     """The bundled Mush-Z source must fetch over TLS (size-only integrity needs a safe channel)."""
     from genericmud.packs import manifest_sources
@@ -149,3 +192,9 @@ def test_mush_z_source_uses_https():
     assert src is not None
     assert src.base_url.startswith("https://")
     assert src.manifest_url.startswith("https://")
+    assert src.entry == "worlds/plugins/AlterAeon.xml"
+
+    stellar = manifest_sources.by_id("stellarmush")
+    assert stellar is not None
+    assert stellar.base_url == "https://update.xirr.com/stellar_aeon/stellarmush-stable/"
+    assert stellar.entry == "worlds/plugins/stellarAeon/soundpackSA.xml"

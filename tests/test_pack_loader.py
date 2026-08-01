@@ -84,6 +84,29 @@ def test_activate_mushclient_world_includes_its_plugins(tmp_path):
     assert any(p["file"].endswith("boom.wav") for p in sink.played)
 
 
+def test_activation_reports_optional_plugins_and_bad_rules(tmp_path):
+    _sink, engine, store = _engine_and_store(tmp_path)
+    pack = tmp_path / "compat"
+    pack.mkdir()
+    (pack / "bad.lua").write_text("error('broken module')", encoding="latin-1")
+    (pack / "world.MCL").write_text(
+        "<muclient><script><![CDATA[optional_plugins={x='extra'}; require('bad')]]></script>"
+        "<triggers>"
+        '<trigger match="bad" enabled="y" send_to="12"><send>invalid lua.</send></trigger>'
+        '<trigger match="good" enabled="y" send_to="0"><send>look</send></trigger>'
+        "</triggers></muclient>",
+        encoding="latin-1",
+    )
+    store.install(pack, world="mud", entry="world.MCL", trust=True)
+    result = activate_world(store, "mud", engine)
+    assert result.loaded == ["compat"]
+    assert result.skipped_plugins["compat"] == [
+        ("extra.xml", "declared optional by the pack")
+    ]
+    assert result.skipped_rules["compat"][0][0] == "bad"
+    assert result.module_errors["compat"][0][0].startswith("require(bad)")
+
+
 def test_trusted_mushclient_pack_gets_full_stdlib(tmp_path):
     # A trusted pack's script uses stdlib the sandbox normally strips: os.time, loadstring,
     # and a module(..., package.seeall) library (whose own ipairs needs seeall). activate_world

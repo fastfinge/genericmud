@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import gzip
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -34,6 +35,7 @@ from genericmud.packs.manifest_sources import ManifestSource
 _BASELINE_NAME = ".gm_manifest.lst"  # our copy of the last-synced manifest, kept for diffing
 _MANIFEST_MAX_BYTES = 32 * 1024 * 1024  # a manifest is text; 32 MiB is vast headroom
 _PER_FILE_SLACK = 1 << 20  # allow a file up to its manifest size + 1 MiB before aborting
+_SYNC_WORKERS = 12  # bounded: fast enough for thousands of small files without hammering the host
 
 # A manifest entry: the upstream (opaque) hash and the byte size.
 ManifestEntry = tuple[str, int]
@@ -49,7 +51,7 @@ class SyncResult:
 
     @property
     def ok(self) -> bool:
-        return not self.failed
+        return not self.failed and not self.rejected
 
 
 def parse_manifest(raw: bytes) -> dict[str, ManifestEntry]:
@@ -92,6 +94,10 @@ def sync(
 
     manifest_raw = _fetch_manifest(source, pack_dir, download)
     remote = parse_manifest(manifest_raw)
+    if not remote:
+        raise ValueError("remote manifest contained no valid file entries")
+    if source.entry not in remote:
+        raise ValueError(f"remote manifest does not contain its configured entry {source.entry!r}")
     baseline = _load_baseline(pack_dir)
     result = SyncResult()
 
@@ -100,21 +106,43 @@ def sync(
 
     wanted = {rel: entry for rel, entry in remote.items() if included(rel)}
     total = len(wanted)
-    for done, (rel, entry) in enumerate(wanted.items(), start=1):
+    jobs: list[tuple[str, ManifestEntry, Path]] = []
+    done = 0
+
+    def progressed(rel: str) -> None:
+        nonlocal done
+        done += 1
         if progress is not None:
             progress(done, total, rel)
+
+    for rel, entry in wanted.items():
         dest = safepath.confine(pack_dir, rel)
         if dest is None:  # traversal / absolute / UNC — refuse to write it anywhere
             result.rejected.append(rel)
+            progressed(rel)
             continue
         if not _needs_download(dest, entry, baseline.get(rel)):
             result.skipped_unchanged += 1
+            progressed(rel)
             continue
-        try:
-            _fetch_file(source, rel, entry, dest, download)
-            result.downloaded += 1
-        except Exception as exc:  # noqa: BLE001 - one bad file must not sink the whole sync
-            result.failed.append(f"{rel}: {type(exc).__name__}: {exc}")
+        jobs.append((rel, entry, dest))
+
+    # Mush-Z has thousands of small files. Serial HTTPS handshakes turn first install into an
+    # hour-long operation; bounded parallelism keeps the same atomic per-file contract while
+    # reducing wall time without opening an unbounded connection fan-out.
+    with ThreadPoolExecutor(max_workers=min(_SYNC_WORKERS, max(len(jobs), 1))) as pool:
+        futures = {
+            pool.submit(_fetch_file, source, rel, entry, dest, download): rel
+            for rel, entry, dest in jobs
+        }
+        for future in as_completed(futures):
+            rel = futures[future]
+            try:
+                future.result()
+                result.downloaded += 1
+            except Exception as exc:  # noqa: BLE001 - one bad file must not sink the whole sync
+                result.failed.append(f"{rel}: {type(exc).__name__}: {exc}")
+            progressed(rel)
 
     _delete_removed(pack_dir, remote, baseline, included, result)
 
@@ -144,10 +172,14 @@ def _load_baseline(pack_dir: Path) -> dict[str, ManifestEntry]:
 
 
 def _needs_download(dest: Path, entry: ManifestEntry, baseline_entry: ManifestEntry | None) -> bool:
-    if baseline_entry != entry:  # new file, or upstream hash/size changed
+    if baseline_entry is not None and baseline_entry != entry:
+        # A previously completed sync says this path changed upstream. Fetch even when the new
+        # file happens to have the same size: the opaque manifest hash is the change signal.
         return True
     try:
-        return not dest.is_file() or dest.stat().st_size != entry[1]  # baseline stale vs. disk
+        # With no committed baseline, a correctly-sized live file was atomically completed by
+        # an interrupted first sync. Reuse it; `.part` files are never promoted here.
+        return not dest.is_file() or dest.stat().st_size != entry[1]
     except OSError:
         return True
 

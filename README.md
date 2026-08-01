@@ -115,8 +115,9 @@ you type (`sh *` sends `shoot %1`), and hotkeys bind a key to a command —
 press the key combination you want and it's captured. Everything saves
 immediately and works on the very next line from the MUD.
 
-Ready-made packs: **File → Browse Soundpacks Online** pulls from the
-community Soundpack Vault, and **File → Set Up a Soundpack** installs one
+Ready-made packs: **Soundpacks → Browse soundpacks online** (or
+**Ctrl+Shift+B**) pulls from the
+community Soundpack Vault, and **Soundpacks → Set up a soundpack from a folder** installs one
 from a folder, a zip, or a download link. VIPMud `.set` packs and MUSHclient
 packs load too (MUSHclient ones ask for your trust first, because they
 contain code).
@@ -165,6 +166,7 @@ Menus: **Alt+F** File, **Alt+R** Rules, **Alt+V** View, **Alt+H** Help.
 | Alt+W / Alt+S | Where am I / stop walking |
 | Ctrl+P | Manage soundpacks |
 | Ctrl+B | Soundpack builder |
+| Ctrl+Shift+B | Browse soundpacks online |
 | Alt+Shift+L | Log this session to a file |
 | Alt+Shift+D | Speak the diagnostic log location and summary |
 

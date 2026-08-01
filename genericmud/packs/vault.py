@@ -34,6 +34,10 @@ class BlockedUrl(Exception):
     """A download URL was refused (non-web scheme, or a private/loopback host)."""
 
 
+class SourceUnavailable(Exception):
+    """The catalogue entry has no archive genericMud can currently retrieve."""
+
+
 def _validate_url(url: str) -> None:
     """Refuse SSRF-shaped download URLs before urlopen sees them.
 
@@ -95,7 +99,6 @@ _DOWNLOAD_LABELS = (
     ("Source page", "source"),
 )
 
-
 @dataclass(frozen=True)
 class VaultPack:
     id: int
@@ -120,6 +123,17 @@ class VaultDownload:
     @property
     def installable(self) -> bool:
         return self.kind == "zip"
+
+
+# Some authors publish a Windows installer on the vault page but the installer itself consumes
+# a portable update archive. Prefer that archive so genericMud never executes downloaded code.
+_CURATED_ARCHIVE_FALLBACKS = {
+    10: VaultDownload(
+        url="https://www.blazingstarradio.com/prometheus/Prometheus-update.zip",
+        role="updater",
+        kind="zip",
+    ),
+}
 
 
 def _text(fragment: str) -> str:
@@ -172,6 +186,9 @@ def pack_downloads(pack_id: int, opener=_secure_urlopen) -> list[VaultDownload]:
         if match:
             url = html.unescape(match.group(1))
             downloads.append(VaultDownload(url=url, role=role, kind=_kind(url)))
+    fallback = _CURATED_ARCHIVE_FALLBACKS.get(pack_id)
+    if fallback is not None and all(item.url != fallback.url for item in downloads):
+        downloads.append(fallback)
     return downloads
 
 

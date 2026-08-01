@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +86,38 @@ def test_sphook_play_action_named_wildcards_and_sppath_default():
     assert cue["file"] == "/snd/general/misc/on.wav"
     assert abs(cue["gain"] - 0.8) < 1e-9
     assert cue["loop"] is False
+
+
+def test_installer_declared_remote_sound_is_fetched_once_and_played(tmp_path, monkeypatch):
+    (tmp_path / "SoundSync.exe").write_bytes(b"windows helper")
+    (tmp_path / "installer.bat").write_text(
+        'set "REPO_URL=https://gitea.example/Cosmic/Sounds"\n'
+        'set "REPO_SUBFOLDER=wav"\n',
+        encoding="latin-1",
+    )
+    downloads = []
+
+    def download(url, destination, **_kwargs):
+        downloads.append(url)
+        destination.write_bytes(b"RIFF-fake-wave")
+
+    monkeypatch.setattr("genericmud.packs.vault.download", download)
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    pack = VipMudPack(ScriptApi(engine, source="vip", base_dir=str(tmp_path)))
+    pack.load_source(SPHOOK)
+
+    line = Line("$sphook play:general/misc/on:80:0:0:1")
+    engine.process_line(line)
+    engine.process_line(Line(line.plain_text))
+
+    expected = tmp_path / "sounds" / "wav" / "general" / "misc" / "on.wav"
+    assert expected.read_bytes() == b"RIFF-fake-wave"
+    assert downloads == [
+        "https://gitea.example/Cosmic/Sounds/raw/branch/main/wav/general/misc/on.wav"
+    ]
+    assert len(sink.played) == 2
+    assert all(Path(cue["file"]) == expected for cue in sink.played)
 
 
 def test_sphook_loop_action_loops_and_stores_handle(tmp_path):

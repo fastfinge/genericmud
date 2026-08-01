@@ -41,10 +41,11 @@ the View menu if NVDA needs your numpad). Type .3n2e to speedwalk. Alt+B
 drops a breadcrumb and Alt+R walks you back to it.
 
 Triggers and sounds:
-Ctrl+B opens the soundpack builder. A trigger watches for text and can play
+Ctrl+B opens the soundpack builder. Ctrl+Shift+B browses soundpacks online.
+A trigger watches for text and can play
 a sound, speak, send a command, hide the line, or interrupt speech — the
-simple match is "the line contains this text", no scripting needed. File
-menu, Browse Soundpacks Online fetches ready-made packs.
+simple match is "the line contains this text", no scripting needed. Soundpacks
+menu, Browse soundpacks online fetches ready-made packs.
 
 Sharing:
 File menu, Export This World saves your whole setup — connection, triggers,
@@ -114,6 +115,7 @@ Alt+S             Stop walking
 Tools:
 Ctrl+P            Manage soundpacks
 Ctrl+B            Soundpack builder
+Ctrl+Shift+B      Browse soundpacks online
 Alt+Shift+L       Log this session to a file
 Alt+Shift+D       Speak the diagnostic log location and summary
 """

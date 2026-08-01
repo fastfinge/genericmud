@@ -130,6 +130,32 @@ def test_detect_entry_picks_the_richest_mcl_world(tmp_path):
     assert detect_entry(pack) == "worlds/Main World.MCL"
 
 
+def test_detect_entry_uses_mud_plugin_instead_of_inert_world(tmp_path):
+    pack = tmp_path / "bundle"
+    (pack / "worlds" / "plugins").mkdir(parents=True)
+    (pack / "worlds" / "Mystavaria.MCL").write_text(MCL, encoding="latin-1")
+    (pack / "worlds" / "plugins" / "mystavaria.xml").write_text(
+        "<muclient><plugin name='Mystavaria' id='myst'/><triggers>"
+        "<trigger match='hit' enabled='y'/></triggers></muclient>",
+        encoding="latin-1",
+    )
+    assert detect_entry(pack, mud_name="Mystavaria") == "worlds/plugins/mystavaria.xml"
+
+
+def test_detect_entry_finds_soundpack_plugin_in_plugin_manager_repo(tmp_path):
+    pack = tmp_path / "repository"
+    pack.mkdir()
+    (pack / "manager.xml").write_text(
+        "<muclient><plugin name='Manager' id='manager'/><aliases>"
+        "<alias match='manage' enabled='y'/></aliases></muclient>", encoding="latin-1"
+    )
+    (pack / "aard_soundpack.xml").write_text(
+        "<muclient><plugin name='Aardwolf Soundpack' id='sounds'/><triggers>"
+        "<trigger match='hit' enabled='y'/></triggers></muclient>", encoding="latin-1"
+    )
+    assert detect_entry(pack, mud_name="Aardwolf") == "aard_soundpack.xml"
+
+
 def test_entry_problem_distinguishes_dead_ends(tmp_path):
     installer = tmp_path / "inst"
     installer.mkdir()

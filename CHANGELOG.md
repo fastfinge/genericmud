@@ -7,6 +7,46 @@ fails the build on purpose.
 
 Entries start at 0.7.1. Earlier releases were tagged before this file existed.
 
+## 0.8.1 — 2026-07-31
+
+**Online soundpacks install from the sources that actually contain them**
+
+* Press Ctrl+Shift+B to open Browse Soundpacks Online from anywhere in the
+  client.
+* Packs whose Vault download is only an installer or stale web page now use the
+  author's real repository or update feed. Downloads are checked before setup,
+  alternate published links are tried, and an unavailable author archive is
+  reported plainly instead of looking like a genericMud failure.
+* Large manifest-based packs download concurrently, resume cleanly after an
+  interruption, and never promote a partial file into the active pack.
+
+**MUSHclient packs keep their sound behavior without importing another client**
+
+* Plugins that only provide MUSHclient's windows, updater, mapper, logging, help,
+  or speech output are represented as satisfied but skipped. Pack dependency
+  managers keep working, and Manage Soundpacks reports every compatibility skip
+  separately from a real error.
+* Sound plugins can now use the lifecycle, GMCP, plugin-to-plugin calls, HTTP,
+  JSON, SQLite, filesystem helpers, audio modules, hotkeys, and world information
+  expected by current MUSHclient packs.
+* One malformed optional rule, missing optional plugin, or unsupported non-Lua
+  helper no longer prevents the rest of the soundpack from loading.
+
+**VIPMud packs find both bundled and remotely managed sounds**
+
+* Installer-style packs such as Cosmic Rage fetch a missing sound from their
+  declared sound repository when it is first needed, then reuse the local copy.
+  Downloads remain confined to that pack and are size-limited.
+* Deferred loaders, nested settings files, Windows paths, and archived files with
+  an accidental doubled `.wav` extension now resolve correctly.
+
+**Verified against the live catalogue**
+
+* Every currently retrievable MUSHclient and VIPMud entry in the Soundpack Vault
+  installs and activates without plugin, script, module, or lifecycle errors.
+  The one author archive that is currently offline is shown as Source unavailable
+  and does not affect the other packs.
+
 ## 0.8.0 — 2026-07-31
 
 **genericMud now runs on Mac and Linux**

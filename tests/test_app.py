@@ -115,6 +115,27 @@ def test_gmcp_subnegotiation_posts_status():
     assert any(m["type"] == "status" for m in posted)
 
 
+def test_incoming_text_and_gmcp_are_routed_to_mushclient_plugins():
+    app, _backend, _sent, _posted = _app()
+
+    class Pack:
+        lines: list[str] = []
+        gmcp: list[tuple[str, object]] = []
+
+        def dispatch_line(self, line):
+            self.lines.append(line)
+
+        def dispatch_gmcp(self, package, value):
+            self.gmcp.append((package, value))
+
+    pack = Pack()
+    app._mush_packs = [pack]
+    app.on_telnet_event(DataReceived(b"incoming\r\n"))
+    app.on_telnet_event(Subnegotiation(OPT_GMCP, b'Comm.Channel {"msg":"hello"}'))
+    assert pack.lines == ["incoming"]
+    assert pack.gmcp == [("Comm.Channel", {"msg": "hello"})]
+
+
 def test_msp_line_emits_sound_and_strips_tag():
     app, backend, _sent, posted = _app()
     app.on_telnet_event(DataReceived(b"A thud !!SOUND(hit.wav V=80)\r\n"))

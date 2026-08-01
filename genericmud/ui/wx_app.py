@@ -998,7 +998,7 @@ class PackManagerDialog(wx.Dialog):
             ("&Enable or disable", self._on_toggle_enabled),
             ("&Trust or untrust", self._on_toggle_trust),
             ("&Uninstall", self._on_uninstall),
-            ("Check &conflicts", self._on_conflicts),
+            ("Check &compatibility", self._on_conflicts),
             ("&Update from source", self._on_update),
         ):
             button = wx.Button(self, label=label)
@@ -1135,13 +1135,30 @@ class PackManagerDialog(wx.Dialog):
         result = activate_world(self._store, world, AutomationEngine(), require_trust=False)
         count = len(result.loaded)
         packs = "pack" if count == 1 else "packs"
-        lines = [f"{count} {packs} loaded with no problems for {world}."]
+        lines = [f"{count} {packs} loaded for {world}."]
         for pack_id, error in result.failed.items():
             lines.append(f"Couldn't load {pack_id}: {error}")
         for conflict in result.conflicts:
             who = " and ".join(conflict.sources)
             lines.append(f"{who} both define the {conflict.kind} '{conflict.token}'.")
-        wx.MessageBox("\n".join(lines), "Conflicts", wx.OK | wx.ICON_INFORMATION, self)
+        for pack_id, items in result.skipped_plugins.items():
+            names = ", ".join(name for name, _reason in items[:3])
+            more = f", plus {len(items) - 3} more" if len(items) > 3 else ""
+            lines.append(
+                f"{pack_id}: {len(items)} optional or client-only plugins skipped "
+                f"({names}{more})."
+            )
+        for pack_id, items in result.skipped_rules.items():
+            lines.append(f"{pack_id}: {len(items)} malformed upstream rules skipped.")
+        for pack_id, items in result.plugin_errors.items():
+            lines.append(f"{pack_id}: {len(items)} plugin compatibility errors.")
+        for pack_id, items in result.external_script_errors.items():
+            lines.append(f"{pack_id}: {len(items)} external-script compatibility errors.")
+        for pack_id, items in result.module_errors.items():
+            lines.append(f"{pack_id}: {len(items)} bundled-module compatibility errors.")
+        wx.MessageBox(
+            "\n".join(lines), "Soundpack compatibility", wx.OK | wx.ICON_INFORMATION, self
+        )
 
     def _on_update(self, _event: wx.CommandEvent) -> None:
         pack_id = self._selected_pack()
@@ -1160,6 +1177,21 @@ class PackManagerDialog(wx.Dialog):
             )
 
         def work():
+            manifest_source = manifest_sources.by_id(pack_id)
+            if manifest_source is not None:
+                return setup_pack_from_manifest(
+                    self._store, manifest_source, diag=self._diag
+                )
+            git_source = git_sources.by_id(pack_id)
+            if git_source is not None:
+                return setup_pack_from_git(
+                    self._store,
+                    git_source,
+                    download=lambda url, dest, **kwargs: vault.download(
+                        url, dest, **kwargs
+                    ),
+                    diag=self._diag,
+                )
             return update_pack(
                 self._store, pack_id,
                 fetch=lambda url, dest: vault.download(url, dest, max_bytes=_SOURCE_MAX_BYTES),
@@ -1393,12 +1425,30 @@ class VaultBrowserDialog(wx.Dialog):
                 ),
                 pack.mud,
             )
-        best = vault.best_download(vault.pack_downloads(pack.id))
-        if best is None:
-            raise PackError("no downloadable archive for this pack; use Open in browser")
+        candidates = [item for item in vault.pack_downloads(pack.id) if item.installable]
+        if not candidates:
+            raise vault.SourceUnavailable(
+                "no downloadable archive is published; use Open in browser for the author page"
+            )
         tmp = Path(tempfile.mkdtemp(prefix="genericmud-pack-"))
         try:
-            archive = vault.download(best.url, tmp / "pack.zip", progress=self._progress)
+            archive = tmp / "pack.zip"
+            errors: list[str] = []
+            selected = None
+            for candidate in candidates:
+                try:
+                    vault.download(candidate.url, archive, progress=self._progress)
+                except Exception as exc:  # noqa: BLE001 - try the pack's next published source
+                    errors.append(f"{candidate.role}: {type(exc).__name__}: {exc}")
+                    continue
+                if zipfile.is_zipfile(archive):
+                    selected = candidate
+                    break
+                errors.append(f"{candidate.role}: response was not a ZIP archive")
+            if selected is None:
+                raise vault.SourceUnavailable(
+                    "the published archives are unavailable (" + "; ".join(errors) + ")"
+                )
             extracted = tmp / slugify(pack.name)  # pack-named dir -> a stable, unique pack id
             self._status(f"Extracting {pack.name}.")
             try:
@@ -1409,8 +1459,8 @@ class VaultBrowserDialog(wx.Dialog):
                 raise PackError(
                     "the download wasn't a ZIP (the site may have served a web page)"
                 ) from exc
-            entry = detect_entry(extracted)
-            origin = best.url  # record where the content came from, so it can be updated
+            entry = detect_entry(extracted, mud_name=pack.mud)
+            origin = selected.url  # record the source that actually yielded a valid archive
             if entry is None:  # an installer bundle? follow the repo it clones
                 extracted, entry, followed = self._follow_installer(extracted, tmp)
                 if followed:
@@ -1501,6 +1551,12 @@ class VaultBrowserDialog(wx.Dialog):
         if not self._alive:
             return
         if isinstance(outcome, Exception):
+            if isinstance(outcome, vault.SourceUnavailable):
+                if self._diag is not None:
+                    self._diag.event("vault.unavailable", error=str(outcome))
+                self._status(f"Source unavailable: {outcome}")
+                self._setup_btn.Enable()
+                return
             if self._diag is not None:
                 self._diag.event("vault.failed", error=repr(outcome),
                                  trace="".join(traceback.format_exception(outcome)))
@@ -2165,7 +2221,9 @@ class GenericMudFrame(wx.Frame):
         # which is nav:retrace). Item labels spell out how each install differs.
         packs_menu = wx.Menu()
         packs_item = packs_menu.Append(wx.ID_ANY, "&Manage installed soundpacks...\tCtrl+P")
-        browse_item = packs_menu.Append(wx.ID_ANY, "Browse soundpacks &online...")
+        browse_item = packs_menu.Append(
+            wx.ID_ANY, "Browse soundpacks &online...\tCtrl+Shift+B"
+        )
         setup_item = packs_menu.Append(wx.ID_ANY, "Set &up a soundpack from a folder...")
         builder_item = packs_menu.Append(wx.ID_ANY, "Soundpack &builder...\tCtrl+B")
         menubar.Append(packs_menu, "Sound&packs")

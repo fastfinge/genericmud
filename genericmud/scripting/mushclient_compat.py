@@ -20,15 +20,21 @@ resolves against the pack dir). Out of scope: the full plugin-suite surface
 
 from __future__ import annotations
 
-import glob
+import json
 import re
+import time
 import xml.etree.ElementTree as ET
+from fnmatch import fnmatchcase
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request
+from uuid import uuid4
 
 from genericmud.automation.engine import MatchContext
 from genericmud.scripting.api import ScriptApi
 from genericmud.scripting.guard import ScriptGuard
 from genericmud.scripting.lua_runtime import install_pack_require, make_sandboxed_runtime
+from genericmud.scripting.sqlite_compat import make_sqlite_bridge
 
 _WILDCARD_RE = re.compile(r"%(\d)")
 _SEND_TO_SCRIPT = "12"
@@ -38,6 +44,18 @@ _SOUND_CHANNEL = "sound"  # MUSHclient Sound() is a single-voice channel
 _SOUND_BUFFERS = 10  # MUSHclient PlaySound offers buffers 1..10; 0 = first free
 _VOLUME_MAX = 100.0  # MUSHclient volume is 0..100
 _PAN_MAX = 100.0  # bass/MUSHclient pan is -100..100; the SoundBus wants -1..1
+_HTTP_CHUNK_BYTES = 16 * 1024
+_HTTP_MAX_BYTES = 32 * 1024 * 1024
+_HTTP_TIMEOUT_SECONDS = 20
+
+
+def _open_http(url: str):
+    """Open a public HTTP(S) URL with the pack downloader's redirect/SSRF checks."""
+    from genericmud.packs.vault import _secure_urlopen, _validate_url
+
+    _validate_url(url)
+    request = Request(url, headers={"User-Agent": "genericMud-soundpack-runtime"})
+    return _secure_urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS)
 
 
 def _buffer_channel(number: int) -> str:
@@ -60,7 +78,21 @@ _LIFECYCLE_HOOKS = (
     "OnPluginSaveState",
     "OnPluginTick",
     "OnPluginLineReceived",
+    "OnPluginPartialLine",
     "OnPluginBroadcast",
+    "OnPluginListChanged",
+    "OnPluginCommandEntered",
+    "OnPluginCommand",
+    "OnPluginSend",
+    "OnPluginSent",
+    "OnPluginPacketReceived",
+    "OnPluginPlaySound",
+    "OnPluginTelnetOption",
+    "OnPluginScreendraw",
+    "OnPluginWorldOutputResized",
+    "OnPluginGetFocus",
+    "OnPluginLoseFocus",
+    "OnPluginTabComplete",
     "OnPluginTelnetRequest",
     "OnPluginTelnetSubnegotiation",
 )
@@ -71,9 +103,7 @@ def _to_float(value: object) -> float | None:
         return float(value)  # lupa hands Lua numbers over as int/float; nil arrives as None
     except (TypeError, ValueError):
         return None
-# GetInfo() directory codes (app/config/world/plugin dirs). Real packs build sound paths
-# relative to the WORLD file's directory, so every dir code resolves to it (see _get_info).
-_DIR_INFO_CODES = frozenset({56, 60, 64, 66, 67})
+_MUSHCLIENT_VERSION = "5.06"
 
 # MUSHclient's AddTrigger/AddTriggerEx flag bits (exposed to packs as `trigger_flag`).
 _TRIGGER_FLAGS = {
@@ -91,6 +121,32 @@ _TRIGGER_FLAGS = {
 }
 _SCRIPT_ERROR_OK = 0  # MUSHclient eOK; nonzero = failure (packs rarely check)
 _MOD_ORDER = ("ctrl", "alt", "shift")  # canonical combo order, matching the UI's _key_combo
+
+# Client-shell plugins whose job genericMud already owns. Loading them runs Windows UI,
+# editor, or self-update code that cannot contribute a sound cue here. They are represented as
+# enabled virtual plugins so dependency managers remain satisfied, and the skip is reported.
+_HOST_PLUGIN_REPLACEMENTS = {
+    "current_output_window.xml": "genericMud owns the output window",
+    "capture2dworld.xml": "genericMud owns output review windows",
+    "capture2notepads.xml": "genericMud owns output review windows",
+    "localedit.xml": "genericMud owns command editing",
+    "log_manager.xml": "genericMud owns session logging",
+    "mushclient_help.xml": "genericMud provides its own help",
+    "mm_gmcp_mapper_gmcp.xml": "genericMud does not load MUSHclient miniwindow mappers",
+    "output_functions.xml": "genericMud owns output review windows",
+    "plugins_updater_v2.xml": "genericMud owns soundpack updates",
+    "trace_to_notepad.xml": "genericMud provides diagnostics instead of Notepad tracing",
+    "updater.xml": "genericMud owns soundpack updates",
+    "update_watcher.xml": "genericMud owns soundpack updates",
+    "version_check.xml": "genericMud owns update checks and client preferences",
+    "lua_sapi.xml": "genericMud owns automatic speech output",
+    "mushreader.xml": "genericMud owns automatic speech output",
+    "sapi_speaker.xml": "genericMud owns automatic speech output",
+    "text_to_speech.xml": "genericMud owns automatic speech output",
+    "universal_text_to_speech.xml": "genericMud owns automatic speech output",
+}
+_NON_LUA_SCRIPT_SUFFIXES = frozenset({".js", ".pl", ".pys", ".vbs"})
+_GMCP_HANDLER_ID = "3e7dedbe37e44942dd46d264"  # GMCP_handler_NJG broadcast identity
 
 
 def _reduce_ints(args: tuple, op) -> int:
@@ -129,23 +185,51 @@ class MushclientPack:
         if self._base_dir and not api.get_var("sppath"):
             api.set_var("sppath", self._base_dir)
         self._world_dir: str | None = None  # dir of the loaded world file; anchors GetInfo() paths
+        self._world_path: Path | None = None
+        self._client_dir = Path(self._base_dir).resolve() if self._base_dir else None
+        self._world_id = uuid4().hex[:24]
+        self._world_name = ""
+        self._world_address = ""
+        self._world_port = 0
         self._exposed: dict[str, dict] = {}  # ppi: plugin id -> {exposed name -> Lua fn}
         self._current_plugin = "world"  # whose script is loading now (for ppi.Expose)
+        self._current_document: Path | None = None
         self._loaded_includes: set[Path] = set()  # resolved paths, so each file loads once
         self._include_errors: list[tuple[str, str]] = []  # plugins that failed to load (name, why)
+        self._skipped_plugins: list[tuple[str, str]] = []  # optional/missing plugins (name, why)
+        self._rule_errors: list[tuple[str, str]] = []  # malformed rules skipped in isolation
+        self._external_script_errors: list[tuple[str, str]] = []
+        self._module_errors: list[tuple[str, str]] = []
+        self._hook_errors: list[tuple[str, str]] = []
+        self._plugin_info: dict[str, dict[str, object]] = {}
+        self._plugin_file_by_id: dict[str, Path] | None = None
+        self._file_index: dict[str, list[Path]] | None = None
         self._hooks: dict[str, dict[str, object]] = {}  # plugin id -> {hook name -> Lua fn}
         self._arrays: dict[str, dict[str, str]] = {}  # MUSHclient Array* API backing store
+        self._gmcp_values: dict[str, object] = {}
+        self._options: dict[str, object] = {
+            "enable_aliases": 1,
+            "enable_scripts": 1,
+            "enable_timers": 1,
+            "enable_triggers": 1,
+        }
+        self._alpha_options: dict[str, str] = {}
         # AddTriggerEx-made rules, by name. One engine rule per name whose callback reads
         # this state, so a Replace re-registration mutates state instead of stacking a new
         # engine rule per keypress (Erion re-adds its announce triggers on every F-key).
         self._dynamic_triggers: dict[str, dict] = {}
+        self._xml_rules: list[dict[str, object]] = []  # enabled state for XML rules/groups
         self._dyn_counter = 0  # unique engine-rule name per dynamic trigger, so retired ones
+        self._unique_number = 0
         #                        (deleted / one-shot spent / pattern-replaced) get removed from
         #                        the engine instead of piling up as dead, still-scanned rules
         # MUSHclient targets Lua 5.1; trusted packs keep the full stdlib their
         # libraries assume (os/io/loadstring + the module(..., package.seeall) idiom).
         self._script_error_spoken = False  # speak the first fire-time script fault, trace the rest
         self._lua, install_hook = make_sandboxed_runtime(lua51=True, full_stdlib=full_stdlib)
+        if full_stdlib:
+            self._install_io_compat()
+            self._install_os_compat()
         # Untrusted packs fail closed if the runaway-loop guard can't be installed; a trusted
         # pack is user-vouched arbitrary code, so a missing hook is acceptable there.
         self._guard = ScriptGuard(
@@ -155,6 +239,7 @@ class MushclientPack:
         self._install_sendpkt()
         self._install_audio()
         self._install_nvda()
+        self._install_utils()
         # Calls fn(option, <lua byte-string>) entirely on the Lua side: an MSDP payload
         # is rarely valid UTF-8, so it crosses the lupa boundary as a table of byte
         # values, never as a string (lupa's string conversion would raise or mangle it).
@@ -176,8 +261,37 @@ class MushclientPack:
         black_hole = self._lua.eval(
             "setmetatable({}, {__call=function(t) return t end, __index=function(t) return t end})"
         )
+        bass_bridge = self._make_bass_bridge()
+        json_bridge = self._make_json_bridge()
+        lfs_bridge = self._make_lfs_bridge()
+        socket_bridge = self._make_socket_bridge()
+        http_bridge, ltn12_bridge = self._make_http_bridges()
+        socket_bridge.http = http_bridge
+        sqlite_bridge = make_sqlite_bridge(
+            self._lua, self._base_dir, lambda: self._client_dir
+        )
+        self._lua.globals().json = json_bridge
+        self._lua.globals().ltn12 = ltn12_bridge
+        self._lua.globals().socket = socket_bridge
+        self._lua.globals().sqlite3 = sqlite_bridge
         install_pack_require(
-            self._lua, self._base_dir, builtins={"ppi": self._make_ppi()}, fallback=black_hole
+            self._lua,
+            self._base_dir,
+            builtins={
+                "ppi": self._make_ppi(),
+                "miriani.lib.audio.bass": bass_bridge,
+                "miriani/lib/audio/bass": bass_bridge,
+                "json": json_bridge,
+                "lfs": lfs_bridge,
+                "ltn12": ltn12_bridge,
+                "socket": socket_bridge,
+                "socket.http": http_bridge,
+                "sqlite3": sqlite_bridge,
+            },
+            fallback=black_hole,
+            on_error=lambda name, path, exc: self._module_errors.append(
+                (f"require({name}) [{path.name}]", f"{type(exc).__name__}: {exc}")
+            ),
         )
         # Only API-shaped names fall into the black hole: MUSHclient functions are CapWords
         # (Sound, WindowCreate, BroadcastPlugin...) plus a few lowercase host libraries
@@ -199,13 +313,311 @@ class MushclientPack:
             "end"
         )(black_hole)
 
+    def _install_io_compat(self) -> None:
+        """Match MUSHclient's pack-relative file paths and legacy read modes."""
+        original_open = self._lua.globals().io.open
+
+        def open_file(
+            filename: object = "", mode: object = "r", *_args: object
+        ) -> object:
+            name = str(filename or "")
+            normalized = name.replace("\\", "/")
+            is_windows_absolute = re.match(r"^[A-Za-z]:/", normalized) is not None
+            if self._base_dir and not Path(normalized).is_absolute() and not is_windows_absolute:
+                target = self._resolve_pack_directory(name)
+                if target is None:
+                    return None, "relative file path escapes the soundpack"
+                name = target.as_posix()
+            return original_open(name, str(mode or "r"))
+
+        self._lua.globals().io.open = open_file
+        self._lua.execute(
+            "local methods = getmetatable(io.stdin).__index\n"
+            "local original_read = methods.read\n"
+            "methods.read = function(handle, ...)\n"
+            "  local count, modes = select('#', ...), {...}\n"
+            "  for i = 1, count do\n"
+            "    if type(modes[i]) == 'string' then\n"
+            "      local mode = string.match(modes[i], '^([alLn])%*$')\n"
+            "      if mode then modes[i] = '*' .. mode end\n"
+            "    end\n"
+            "  end\n"
+            "  return original_read(handle, unpack(modes, 1, count))\n"
+            "end"
+        )
+
+    def _install_os_compat(self) -> None:
+        """Handle Windows ``mkdir`` commands inside the installed pack on any host OS."""
+        original_execute = self._lua.globals().os.execute
+
+        def execute(command: object = "", *_args: object):
+            text = str(command or "")
+            match = re.fullmatch(
+                r'\s*(?:md|mkdir)\s+"([^"]+)"(?:\s+2>\s*nul)?\s*', text, re.IGNORECASE
+            )
+            if match:
+                path = self._resolve_pack_directory(match.group(1))
+                if path is None:
+                    return 1
+                path.mkdir(parents=True, exist_ok=True)
+                return 0
+            return original_execute(text)
+
+        self._lua.globals().os.execute = execute
+
     def _make_ppi(self):
         """A minimal in-process ppi (plugin-to-plugin interface): Expose registers a
         function under the loading plugin; Load returns a plugin's exposed functions."""
         ppi = self._lua.table()
         ppi.Expose = self._ppi_expose
         ppi.Load = self._ppi_load
+        ppi.init = lambda *_a: None
+        ppi.unload = lambda *_a: None
         return ppi
+
+    def _make_bass_bridge(self):
+        """MUSHclient BASS class surface backed by genericMud's sound bus."""
+        api = self._api
+        streams: list[dict[str, object]] = []
+
+        def stream_create_file(*args: object):
+            # Colon call: bass, mem, file, offset, length, flags.
+            file = str(args[2] if len(args) > 2 else "")
+            flags = int(_to_float(args[5]) or 0) if len(args) > 5 else 0
+            state: dict[str, object] = {
+                "active": False,
+                "channel": f"mush-bass-{len(streams) + 1}",
+                "file": file,
+                "gain": 1.0,
+                "pan": 0.0,
+                "loop": bool(flags & 4),
+            }
+            streams.append(state)
+            stream = self._lua.table()
+
+            def play(*_args: object) -> int:
+                api.play(
+                    str(state["file"]),
+                    channel=str(state["channel"]),
+                    gain=float(state["gain"]),
+                    pan=float(state["pan"]),
+                    loop=bool(state["loop"]),
+                )
+                state["active"] = True
+                return _SCRIPT_ERROR_OK
+
+            def stop(*_args: object) -> int:
+                api.stop(str(state["channel"]))
+                state["active"] = False
+                return _SCRIPT_ERROR_OK
+
+            def set_attribute(_stream: object, attribute: object = 0, value: object = 0) -> int:
+                number = int(_to_float(attribute) or 0)
+                scalar = _to_float(value) or 0.0
+                if number == 2:
+                    state["gain"] = scalar
+                    if state["active"]:
+                        api.adjust(str(state["channel"]), gain=scalar)
+                elif number == 3:
+                    state["pan"] = scalar
+                    if state["active"]:
+                        api.adjust(str(state["channel"]), pan=scalar)
+                return _SCRIPT_ERROR_OK
+
+            stream.Play = play
+            stream.Stop = stop
+            stream.Free = stop
+            stream.Pause = stop
+            stream.IsActive = lambda *_a: 1 if state["active"] else 0
+            stream.SetAttribute = set_attribute
+            stream.SlideAttribute = set_attribute
+            return stream
+
+        def set_attribute(*args: object) -> int:
+            # Colon call: bass, stream, attribute, value.
+            if len(args) >= 4:
+                setter = args[1]["SetAttribute"]
+                setter(args[1], args[2], args[3])
+            return _SCRIPT_ERROR_OK
+
+        def free(*_args: object) -> int:
+            for state in streams:
+                if state["active"]:
+                    api.stop(str(state["channel"]))
+                    state["active"] = False
+            return _SCRIPT_ERROR_OK
+
+        bass = self._lua.eval("setmetatable({}, {__call = function(t) return t end})")
+        bass.Init = lambda *_a: _SCRIPT_ERROR_OK
+        bass.Free = free
+        bass.GetConfig = lambda *_a: 0
+        bass.GetVersion = lambda *_a: 0
+        bass.SetConfig = lambda *_a: _SCRIPT_ERROR_OK
+        bass.StreamCreateFile = stream_create_file
+        bass.SetAttribute = set_attribute
+        return bass
+
+    def _make_json_bridge(self):
+        """JSON codec for packs whose bundled implementation depends on native LPeg."""
+
+        def from_lua(value: object):
+            if not hasattr(value, "items"):
+                return value
+            items = list(value.items())
+            integer_keys = [key for key, _item in items if isinstance(key, int)]
+            if len(integer_keys) == len(items) and sorted(integer_keys) == list(
+                range(1, len(items) + 1)
+            ):
+                by_key = dict(items)
+                return [from_lua(by_key[index]) for index in range(1, len(items) + 1)]
+            return {str(key): from_lua(item) for key, item in items}
+
+        bridge = self._lua.table()
+        bridge.decode = lambda value="", *_a: self._to_lua_value(json.loads(str(value)))
+        bridge.encode = lambda value=None, *_a: json.dumps(
+            from_lua(value), ensure_ascii=False, separators=(",", ":")
+        )
+        return bridge
+
+    def _make_socket_bridge(self):
+        """Non-network LuaSocket subset used by packs for a sub-second clock."""
+        bridge = self._lua.table()
+        bridge.gettime = lambda *_a: time.time()
+        return bridge
+
+    def _make_http_bridges(self):
+        """Bounded LuaSocket HTTP GET plus the ``ltn12.sink.table`` contract."""
+        deliver_bytes = self._lua.eval(
+            "function(sink, bytes) local out = {} "
+            "for i = 1, #bytes do out[i] = string.char(bytes[i]) end "
+            "return sink(table.concat(out)) end"
+        )
+        make_table_sink = self._lua.eval(
+            "function(target) return function(chunk) "
+            "if chunk ~= nil then target[#target + 1] = chunk end return 1 end end"
+        )
+
+        def headers_table(headers: object):
+            try:
+                values = {str(key): str(value) for key, value in headers.items()}
+            except AttributeError:
+                values = {}
+            return self._lua.table_from(values)
+
+        def raw_request(options: object = "", *_args: object):
+            if hasattr(options, "items"):
+                url = str(options["url"] or "")
+                sink = options["sink"]
+            else:
+                url = str(options or "")
+                sink = None
+            if not url:
+                return None, 0, self._lua.table(), "missing URL"
+            if sink is None:
+                return None, 0, self._lua.table(), "missing response sink"
+            try:
+                with _open_http(url) as response:
+                    status = int(getattr(response, "status", response.getcode()))
+                    headers = headers_table(response.headers)
+                    reason = str(getattr(response, "reason", ""))
+                    length = response.headers.get("Content-Length")
+                    if length is not None and int(length) > _HTTP_MAX_BYTES:
+                        return None, 413, headers, "response exceeds sound download limit"
+                    total = 0
+                    while True:
+                        chunk = response.read(_HTTP_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > _HTTP_MAX_BYTES:
+                            return None, 413, headers, "response exceeds sound download limit"
+                        deliver_bytes(sink, self._lua.table_from(list(chunk)))
+                    sink(None)
+                    return 1, status, headers, reason
+            except HTTPError as error:
+                return None, error.code, headers_table(error.headers), str(error.reason)
+            except Exception as error:  # noqa: BLE001 - LuaSocket reports transport errors
+                return None, 0, self._lua.table(), f"{type(error).__name__}: {error}"
+
+        http = self._lua.table()
+        http.request = self._lua.eval(
+            "function(raw_request, table_sink) return function(options) "
+            "if type(options) == 'table' and options.sink ~= nil then "
+            "return raw_request(options) end "
+            "local body, request = {}, {} "
+            "if type(options) == 'table' then "
+            "for key, value in pairs(options) do request[key] = value end "
+            "else request.url = options end "
+            "request.sink = table_sink(body) "
+            "local ok, status, headers, reason = raw_request(request) "
+            "if not ok then return nil, status, headers, reason end "
+            "return table.concat(body), status, headers, reason end end"
+        )(raw_request, make_table_sink)
+        sink = self._lua.table()
+        sink.table = make_table_sink
+        ltn12 = self._lua.table()
+        ltn12.sink = sink
+        return http, ltn12
+
+    def _make_lfs_bridge(self):
+        """LuaFileSystem reads confined to the installed pack."""
+        base = Path(self._base_dir).resolve() if self._base_dir else None
+        make_iterator = self._lua.eval(
+            "function(items) local i = 0; return function() "
+            "i = i + 1; return items[i] end end"
+        )
+
+        def resolve(value: object) -> Path | None:
+            if base is None:
+                return None
+            normalized = str(value or "").replace("\\", "/")
+            requested = Path(normalized)
+            anchor = self._client_dir or base
+            candidate = requested if requested.is_absolute() else anchor / requested
+            try:
+                candidate = candidate.resolve()
+            except OSError:
+                return None
+            return candidate if candidate.is_relative_to(base) else None
+
+        def attributes(value: object = "", key: object = None, *_args: object):
+            path = resolve(value)
+            if path is None or not path.exists():
+                return None
+            try:
+                stat = path.stat()
+            except OSError:
+                return None
+            values = {
+                "access": stat.st_atime,
+                "change": stat.st_ctime,
+                "mode": "directory" if path.is_dir() else "file",
+                "modification": stat.st_mtime,
+                "size": stat.st_size,
+            }
+            if key is not None:
+                return values.get(str(key))
+            return self._lua.table_from(values)
+
+        def directory(value: object = "", *_args: object):
+            path = resolve(value)
+            if path is None or not path.is_dir():
+                return make_iterator(self._lua.table())
+            try:
+                names = [".", "..", *sorted(item.name for item in path.iterdir())]
+            except OSError:
+                names = []
+            return make_iterator(self._lua.table_from(names))
+
+        lfs = self._lua.table()
+        lfs.attributes = attributes
+        lfs.symlinkattributes = attributes
+        lfs.currentdir = lambda *_a: (self._client_dir or base).as_posix() if base else ""
+        lfs.dir = directory
+        lfs.mkdir = lambda *_a: None
+        lfs.rmdir = lambda *_a: None
+        lfs.chdir = lambda *_a: None
+        return lfs
 
     def _ppi_expose(self, name: object = "", fn: object = None) -> None:
         key = str(name)
@@ -213,12 +625,126 @@ class MushclientPack:
         functions[key] = fn if fn is not None else self._lua.globals()[key]
 
     def _ppi_load(self, plugin_id: object = None):
-        return self._lua.table_from(self._exposed.get(str(plugin_id), {}))
+        key = str(plugin_id or "")
+        if key not in self._plugin_info:
+            target = self._find_plugin_by_id(key)
+            if target is not None and target not in self._loaded_includes:
+                self._loaded_includes.add(target)
+                reason = self._plugin_skip_reason(target)
+                if reason:
+                    self._mark_virtual_plugin(target)
+                    self._skip_plugin(target.name, reason)
+                else:
+                    try:
+                        self._load_path(target)
+                    except Exception as exc:  # noqa: BLE001 - dependency remains isolated
+                        self._include_errors.append(
+                            (target.name, f"{type(exc).__name__}: {exc}")
+                        )
+        functions = self._exposed.get(key)
+        return self._lua.table_from(functions) if functions else None
+
+    def _gmcp_value(self, path: object = ""):
+        value = self._gmcp_values.get(str(path or "").casefold())
+        return self._to_lua_value(value)
+
+    def _to_lua_value(self, value: object):
+        if isinstance(value, dict):
+            table = self._lua.table()
+            for key, item in value.items():
+                table[str(key)] = self._to_lua_value(item)
+            return table
+        if isinstance(value, list):
+            table = self._lua.table()
+            for index, item in enumerate(value, 1):
+                table[index] = self._to_lua_value(item)
+            return table
+        return value
+
+    def _broadcast_plugin(self, message: object = 0, text: object = "", *_args: object) -> int:
+        info = self._plugin_info.get(self._current_plugin, {})
+        self.dispatch(
+            "OnPluginBroadcast", int(_to_float(message) or 0), self._get_plugin_id(),
+            str(info.get("name", "")), str(text or ""),
+        )
+        return _SCRIPT_ERROR_OK
+
+    def _get_plugin_id(self, *_args: object) -> str:
+        return "" if self._current_plugin == "world" else self._current_plugin
+
+    def _get_plugin_name(self, *_args: object) -> str:
+        info = self._plugin_info.get(self._current_plugin, {})
+        return str(info.get("name", ""))
+
+    def _is_plugin_installed(self, plugin_id: object = "", *_args: object) -> bool:
+        return str(plugin_id or "") in self._plugin_info
+
+    def _get_plugin_info(self, plugin_id: object = "", info_type: object = 0, *_args: object):
+        info = self._plugin_info.get(str(plugin_id or ""))
+        if info is None:
+            return None
+        code = int(_to_float(info_type) or 0)
+        if code == 17:  # enabled
+            return bool(info["enabled"])
+        if code == 20:  # plugin directory, including trailing separator
+            path = info.get("path")
+            return path.parent.as_posix() + "/" if isinstance(path, Path) else ""
+        return info.get("name", "") if code == 1 else ""
+
+    def _enable_plugin(self, plugin_id: object = "", enabled: object = True, *_args: object) -> int:
+        info = self._plugin_info.get(str(plugin_id or ""))
+        if info is None:
+            return 1
+        info["enabled"] = bool(enabled)
+        return _SCRIPT_ERROR_OK
+
+    def _load_plugin_api(self, filename: object = "", *_args: object) -> int:
+        name = str(filename or "")
+        target = self._resolve_pack_file(name)
+        if target is None:
+            self._skip_plugin(name, "required plugin is not bundled with the pack")
+            return 1
+        if target in self._loaded_includes:
+            return _SCRIPT_ERROR_OK
+        self._loaded_includes.add(target)
+        reason = self._plugin_skip_reason(target)
+        if reason:
+            self._mark_virtual_plugin(target)
+            self._skip_plugin(target.name, reason)
+            return _SCRIPT_ERROR_OK
+        try:
+            self._load_path(target)
+        except Exception as exc:  # noqa: BLE001 - dependency failure stays local to that plugin
+            self._include_errors.append((name, f"{type(exc).__name__}: {exc}"))
+            return 1
+        return _SCRIPT_ERROR_OK
+
+    def _dofile(self, filename: object = "", *_args: object):
+        """Pack-confined `dofile`; a missing optional support file is a recorded no-op."""
+        name = str(filename or "")
+        target = self._resolve_pack_file(name)
+        if target is None:
+            self._skip_plugin(name, "Lua support file is not bundled with the pack")
+            return None
+        try:
+            return self._load_path(target)
+        except Exception as exc:  # noqa: BLE001 - keep the containing sound plugin usable
+            self._external_script_errors.append((name, f"{type(exc).__name__}: {exc}"))
+            return None
 
     # --- MUSHclient global API ---
 
     def _install_api(self) -> None:
         api = self._api
+
+        def set_variable(name: object = "", value: object = "", *_args: object) -> int:
+            api.set_var(str(name), value)
+            return _SCRIPT_ERROR_OK
+
+        def delete_variable(name: object = "", *_args: object) -> int:
+            api.delete_var(str(name))
+            return _SCRIPT_ERROR_OK
+
         funcs = {
             "Send": api.send,
             "SendNoEcho": api.send,
@@ -233,7 +759,14 @@ class MushclientPack:
             # settings; an ""-for-unset answer makes it adopt "" and every toggle-gated
             # sound stays off.
             "GetVariable": lambda name="": api.get_var(str(name), None),
-            "SetVariable": api.set_var,
+            "SetVariable": set_variable,
+            "GetOption": self._get_option,
+            "SetOption": self._set_option,
+            "GetAlphaOption": self._get_alpha_option,
+            "SetAlphaOption": self._set_alpha_option,
+            "GetAlphaOptionList": self._get_alpha_option_list,
+            "GetGlobalOption": self._get_global_option,
+            "GetGlobalOptionList": self._get_global_option_list,
             # The Array* trio MSDP packs use for state (room name etc.). Real bindings,
             # not black-holed: a black-holed ArrayGet returns a table, and concatenating
             # that raises inside the plugin's subnegotiation handler.
@@ -242,17 +775,43 @@ class MushclientPack:
             "ArrayGet": self._array_get,
             # Truly delete: MUSHclient's GetVariable answers nil after a delete, and
             # packs distinguish nil ("use my default") from "" (a saved empty value).
-            "DeleteVariable": lambda name="": api.delete_var(str(name)),
+            "DeleteVariable": delete_variable,
             # Real transport state: Erion's OnPluginTick branches on it to run its
             # music engine vs. stop everything (the black hole answered truthy-table).
             "IsConnected": lambda *_a: api.is_connected(),
+            "Version": lambda *_a: _MUSHCLIENT_VERSION,
+            "GetUniqueID": lambda *_a: uuid4().hex[:24],
+            "GetUniqueNumber": self._get_unique_number,
+            "GetWorldID": lambda *_a: self._world_id,
+            "GetWorldList": lambda *_a: self._lua.table_from(
+                [self._world_name] if self._world_name else []
+            ),
+            "WorldName": lambda *_a: self._world_name,
+            "WorldAddress": lambda *_a: self._world_address,
+            "WorldPort": lambda *_a: self._world_port,
+            "GetPluginList": lambda *_a: self._lua.table_from(list(self._plugin_info)),
+            "Trim": lambda value="", *_a: str(value).strip(),
+            "GetPluginID": self._get_plugin_id,
+            "GetPluginName": self._get_plugin_name,
+            "GetPluginInfo": self._get_plugin_info,
+            "IsPluginInstalled": self._is_plugin_installed,
+            "LoadPlugin": self._load_plugin_api,
+            "EnablePlugin": self._enable_plugin,
+            "dofile": self._dofile,
+            "gmcp": self._gmcp_value,
+            "BroadcastPlugin": self._broadcast_plugin,
             "Accelerator": self._accelerator,
+            "AcceleratorTo": self._accelerator_to,
             "AddTriggerEx": self._add_trigger_ex,
             "DeleteTrigger": self._delete_trigger,
             "CallPlugin": self._call_plugin,
             "EnableTrigger": self._enable_trigger,
-            "EnableAlias": lambda *_a: None,
-            "EnableTimer": lambda *_a: None,
+            "EnableTriggerGroup": self._enable_trigger_group,
+            "EnableAlias": self._enable_alias,
+            "EnableAliasGroup": self._enable_alias_group,
+            "EnableGroup": self._enable_group,
+            "EnableTimer": lambda *_a: _SCRIPT_ERROR_OK,
+            "AddTimer": self._add_timer_api,
             "Hyperlink": lambda *_a: None,
             "GetSoundKeyword": lambda *_a: "",
             "PlaySound": self._play_sound,
@@ -293,6 +852,31 @@ class MushclientPack:
         for flag_name, value in _TRIGGER_FLAGS.items():
             trigger_flag[flag_name] = value
         g.trigger_flag = trigger_flag
+        sendto = self._lua.table()
+        sendto.world = 0
+        sendto.execute = 10
+        sendto.script = int(_SEND_TO_SCRIPT)
+        g.sendto = sendto
+        timer_flag = self._lua.table()
+        timer_flag.Enabled = 1
+        timer_flag.AtTime = 2
+        timer_flag.OneShot = 4
+        timer_flag.ActiveWhenClosed = 32
+        timer_flag.Replace = 1024
+        timer_flag.Temporary = 16384
+        g.timer_flag = timer_flag
+        error_code = self._lua.table()
+        error_code.eOK = _SCRIPT_ERROR_OK
+        error_code.eInvalidObjectLabel = 1
+        error_code.ePluginFileNotFound = 2
+        error_code.eProblemsLoadingPlugin = 3
+        g.error_code = error_code
+        error_desc = self._lua.table()
+        error_desc[_SCRIPT_ERROR_OK] = "No error"
+        error_desc[1] = "Invalid object label"
+        error_desc[2] = "Plugin file not found"
+        error_desc[3] = "Problems loading plugin"
+        g.error_desc = error_desc
         custom_colour = self._lua.table()
         custom_colour.NoChange = -1
         for i in range(1, 17):
@@ -407,6 +991,12 @@ class MushclientPack:
         audio.free = lambda *_a: api.flush()
         audio.getVolume = lambda *_a: _VOLUME_MAX
         audio.isPlaying = is_playing
+        const = self._lua.table()
+        device = self._lua.table()
+        device.stereo = 0x8000
+        const.device = device
+        audio.const = const
+        audio.Init = lambda *_a: _SCRIPT_ERROR_OK
         self._lua.globals().audio = audio
 
     def _install_nvda(self) -> None:
@@ -429,6 +1019,74 @@ class MushclientPack:
         nvda.stop = lambda *_a: api.stop_speech()
         self._lua.globals().nvda = nvda
 
+    def _install_utils(self) -> None:
+        """Provide MUSHclient's scalar/string and confined directory utilities."""
+
+        def split(value: object = "", delimiter: object = "", maximum: object = 0, *_args):
+            text = str(value)
+            separator = str(delimiter)
+            limit = int(_to_float(maximum) or 0)
+            if not separator:
+                parts = [text]
+            else:
+                parts = text.split(separator, limit if limit > 0 else -1)
+            return self._lua.table_from(parts)
+
+        def readdir(specification: object = "", *_args):
+            if self._base_dir is None:
+                return None
+            base = Path(self._base_dir).resolve()
+            anchor = self._client_dir or base
+            normalized = str(specification or "").replace("\\", "/")
+            requested = Path(normalized)
+            target = requested if requested.is_absolute() else anchor / requested
+            if target.is_dir():
+                directory, wildcard = target, "*"
+            else:
+                directory, wildcard = target.parent, target.name or "*"
+            try:
+                directory = directory.resolve()
+            except OSError:
+                return None
+            if not directory.is_dir() or not directory.is_relative_to(base):
+                return None
+            if wildcard == "*.*":  # Windows treats *.* as every entry.
+                wildcard = "*"
+            result = self._lua.table()
+            matched = False
+            try:
+                children = sorted(directory.iterdir(), key=lambda path: path.name.casefold())
+            except OSError:
+                return None
+            for child in children:
+                if not fnmatchcase(child.name.casefold(), wildcard.casefold()):
+                    continue
+                try:
+                    resolved = child.resolve()
+                    stat = resolved.stat()
+                except OSError:
+                    continue
+                if not resolved.is_relative_to(base):
+                    continue
+                metadata = self._lua.table()
+                metadata.size = stat.st_size
+                metadata.directory = resolved.is_dir()
+                metadata.hidden = child.name.startswith(".")
+                metadata.readonly = not bool(stat.st_mode & 0o200)
+                metadata.normal = not metadata.directory
+                metadata.write_time = stat.st_mtime
+                result[child.name] = metadata
+                matched = True
+            return result if matched else None
+
+        utils = self._lua.eval(
+            "setmetatable({}, {__index = function() "
+            "return function() return nil end end})"
+        )
+        utils.split = split
+        utils.readdir = readdir
+        self._lua.globals().utils = utils
+
     def _colour_note(self, *args: object) -> None:
         # ColourNote(fg, bg, text [, fg, bg, text]...) — concatenate the text parts.
         texts = [str(args[i]) for i in range(2, len(args), 3)]
@@ -442,6 +1100,74 @@ class MushclientPack:
 
     def _array_get(self, name: object = "", key: object = "") -> str | None:
         return self._arrays.get(str(name), {}).get(str(key))  # nil when absent (MUSHclient)
+
+    def _get_option(self, name: object = "", *_args: object) -> object:
+        return self._options.get(str(name), 0)
+
+    def _get_unique_number(self, *_args: object) -> int:
+        self._unique_number += 1
+        return self._unique_number
+
+    def _add_timer_api(
+        self,
+        _name: object = "",
+        hours: object = 0,
+        minutes: object = 0,
+        seconds: object = 0,
+        response: object = "",
+        _flags: object = 0,
+        script_name: object = "",
+        *_args: object,
+    ) -> int:
+        delay = (
+            (_to_float(hours) or 0.0) * 3600
+            + (_to_float(minutes) or 0.0) * 60
+            + (_to_float(seconds) or 0.0)
+        )
+        script = str(script_name or "")
+        text = str(response or "")
+
+        def fire() -> None:
+            target: object = self._lua.globals()
+            for part in script.split(".") if script else ():
+                target = target[part]
+                if target is None:
+                    break
+            if target is not None and script:
+                self._guard.run(target, str(_name or ""))
+            elif text:
+                self._api.send(text)
+
+        self._api.add_timer(max(delay, 0.0), fire)
+        return _SCRIPT_ERROR_OK
+
+    def _set_option(self, name: object = "", value: object = 0, *_args: object) -> int:
+        self._options[str(name)] = value
+        return _SCRIPT_ERROR_OK
+
+    def _get_alpha_option(self, name: object = "", *_args: object) -> str:
+        return self._alpha_options.get(str(name), "")
+
+    def _set_alpha_option(self, name: object = "", value: object = "", *_args: object) -> int:
+        self._alpha_options[str(name)] = str(value)
+        return _SCRIPT_ERROR_OK
+
+    def _get_alpha_option_list(self, *_args: object):
+        return self._lua.table_from(sorted(self._alpha_options))
+
+    def _get_global_option(self, name: object = "", *_args: object) -> object:
+        defaults = {
+            "ConfirmBeforeClosingMushclient": 1,
+            "ConfirmBeforeSavingVariables": 0,
+            "F1macro": 1,
+            "OpenActivityWindow": 0,
+            "SmoothScrolling": 0,
+            "SmootherScrolling": 0,
+        }
+        return defaults.get(str(name), 0)
+
+    def _get_global_option_list(self, *_args: object):
+        return self._lua.table()
 
     def _install_sendpkt(self) -> None:
         """Bind ``SendPkt`` via a Lua-side byte-table trampoline.
@@ -565,23 +1291,45 @@ class MushclientPack:
             self._api.adjust(_SOUND_CHANNEL, gain=level / _VOLUME_MAX)
 
     def _get_info(self, code: object = 0) -> str:
-        """MUSHclient ``GetInfo``: the world file's directory for dir codes, else ``""``.
-
-        Packs build sound paths as ``GetInfo(67).."sounds/x.ogg"`` (with or without a
-        leading slash), so return the loaded world's directory WITH a trailing slash --
-        MUSHclient dir codes end in a separator, and some plugins (Erion's MSDP_handler)
-        append ``"sounds/.."`` with none. Sounds sit beside the world, which may be nested
-        under the pack root, so anchor on the world dir, not ``base_dir``. ``api.play``
-        normpath's the result, so the doubled slash a leading-slash plugin produces is fine.
-        """
+        """Return the file/path/version selectors used by MUSHclient soundpacks."""
         try:
             number = int(code)
         except (TypeError, ValueError):
             return ""
-        if number not in _DIR_INFO_CODES:
-            return ""
-        root = self._world_dir or self._base_dir or ""
-        return f"{root.rstrip('/')}/" if root else ""
+
+        client = self._client_dir
+        world_dir = Path(self._world_dir) if self._world_dir else client
+
+        def directory(path: Path | None) -> str:
+            return path.as_posix().rstrip("/") + "/" if path is not None else ""
+
+        if number == 1:  # current world address
+            return self._world_address
+        if number == 2:  # current world name
+            return self._world_name
+        if number == 54:  # current world file pathname
+            return self._world_path.as_posix() if self._world_path is not None else ""
+        if number == 56:  # MUSHclient application path, with trailing separator
+            return directory(client)
+        if number == 57:  # default world directory
+            return directory(client / "worlds" if client is not None else world_dir)
+        if number == 58:  # default log directory
+            return directory(client / "logs" if client is not None else None)
+        if number == 59:  # default script directory
+            return directory(client / "scripts" if client is not None else None)
+        if number == 60:  # default plugin directory
+            return directory(client / "worlds" / "plugins" if client is not None else None)
+        if number in (64, 66, 68):  # current, application, and startup directories
+            return directory(client)
+        if number == 67:  # directory containing the current world file
+            return directory(world_dir)
+        if number == 72:
+            return _MUSHCLIENT_VERSION
+        if number == 74:  # default sounds directory
+            return directory(client / "sounds" if client is not None else None)
+        if number == 82:  # preferences DB pathname; host-owned and never opened by packs
+            return (client / "MUSHclient_prefs.sqlite").as_posix() if client is not None else ""
+        return ""
 
     def _accelerator(self, key: object = "", send: object = "", *_rest: object) -> None:
         """MUSHclient ``Accelerator(key, send)``: bind a hotkey that runs ``send`` as if
@@ -594,6 +1342,25 @@ class MushclientPack:
         if not combo or not command:
             return
         self._api.add_key(combo, lambda _ctx, cmd=command: self._api.execute(cmd))
+
+    def _accelerator_to(
+        self,
+        key: object = "",
+        send: object = "",
+        destination: object = 0,
+        *_rest: object,
+    ) -> int:
+        """Bind a key to Lua when ``sendto.script`` is requested, else typed input."""
+        combo = _normalize_key_spec(key)
+        command = str(send or "")
+        if not combo or not command:
+            return 1
+        if int(_to_float(destination) or 0) == int(_SEND_TO_SCRIPT):
+            callback = self._compile(command)
+            self._api.add_key(combo, lambda _ctx, fn=callback: self._guard.run(fn))
+        else:
+            self._api.add_key(combo, lambda _ctx, cmd=command: self._api.execute(cmd))
+        return _SCRIPT_ERROR_OK
 
     def _add_trigger_ex(
         self,
@@ -694,10 +1461,40 @@ class MushclientPack:
 
     def _enable_trigger(self, name: object = "", enabled: object = 1, *_rest: object) -> int:
         state = self._dynamic_triggers.get(str(name or ""))
-        if state is None:
-            return 1  # XML-defined triggers stay un-toggleable (as before this existed)
-        state["active"] = bool(_to_float(enabled))
-        return _SCRIPT_ERROR_OK
+        if state is not None:
+            state["active"] = bool(_to_float(enabled))
+            return _SCRIPT_ERROR_OK
+        changed = self._enable_xml_rules("trigger", str(name or ""), enabled, by_group=False)
+        return _SCRIPT_ERROR_OK if changed else 1
+
+    def _enable_xml_rules(
+        self, kind: str | None, token: str, enabled: object, *, by_group: bool
+    ) -> bool:
+        changed = False
+        key = "group" if by_group else "name"
+        for state in self._xml_rules:
+            if (kind is None or state["kind"] == kind) and state[key] == token:
+                state["enabled"] = bool(_to_float(enabled))
+                changed = True
+        return changed
+
+    def _enable_trigger_group(self, group: object = "", enabled: object = 1, *_rest: object) -> int:
+        changed = self._enable_xml_rules(
+            "trigger", str(group or ""), enabled, by_group=True
+        )
+        return _SCRIPT_ERROR_OK if changed else 1
+
+    def _enable_alias(self, name: object = "", enabled: object = 1, *_rest: object) -> int:
+        changed = self._enable_xml_rules("alias", str(name or ""), enabled, by_group=False)
+        return _SCRIPT_ERROR_OK if changed else 1
+
+    def _enable_alias_group(self, group: object = "", enabled: object = 1, *_rest: object) -> int:
+        changed = self._enable_xml_rules("alias", str(group or ""), enabled, by_group=True)
+        return _SCRIPT_ERROR_OK if changed else 1
+
+    def _enable_group(self, group: object = "", enabled: object = 1, *_rest: object) -> int:
+        changed = self._enable_xml_rules(None, str(group or ""), enabled, by_group=True)
+        return _SCRIPT_ERROR_OK if changed else 1
 
     def _call_plugin(self, plugin_id: object = "", func: object = "", *args: object) -> int:
         """MUSHclient ``CallPlugin``: invoke another plugin's exposed function.
@@ -725,11 +1522,20 @@ class MushclientPack:
     def load_file(self, path: str) -> None:
         # The world file's directory anchors GetInfo() sound paths: sounds sit beside the
         # world (often nested below the pack root that require/ resolves against).
-        self._world_dir = Path(path).resolve().parent.as_posix()
-        # MUSHclient world/plugin files are iso-8859-1 (a .MCL declares it); latin-1
-        # decodes any byte without error, and load_source strips the encoding decl.
-        with open(path, encoding="latin-1") as handle:
-            self.load_source(handle.read())
+        entry = Path(path).resolve()
+        self._world_path = entry
+        self._world_dir = entry.parent.as_posix()
+        self._client_dir = Path(self._base_dir).resolve() if self._base_dir else entry.parent
+        for parent in entry.parents:
+            if parent.name.casefold() == "worlds":
+                self._client_dir = parent.parent
+                break
+        self._load_path(entry)
+        # MUSHclient raises this after its initial plugin list settles. Dependency-manager
+        # plugins use it to load their declared requirements (Miriani-Next); optional plugins
+        # are deliberately not loaded and are recorded below.
+        self.dispatch("OnPluginListChanged")
+        self._record_optional_plugins()
 
     def load_source(self, xml: str) -> None:
         # Strip only the XML declaration -- ElementTree rejects an encoding decl on a str.
@@ -740,24 +1546,225 @@ class MushclientPack:
         xml = _sanitize_attr_markup(xml)  # MUSHclient regex attrs carry raw < (named groups)
         self._load_plugin(ET.fromstring(xml))
 
+    def _load_path(self, path: Path) -> None:
+        """Load one XML/Lua include while retaining its directory for relative children."""
+        previous = self._current_document
+        self._current_document = path
+        try:
+            text = path.read_text(encoding="latin-1", errors="ignore")
+            # MUSHclient's `constants.lua` is often an XML <script> wrapper despite its
+            # suffix. Sniff the content rather than trusting the extension.
+            if text.lstrip().startswith("<"):
+                self.load_source(text)
+            else:
+                self._guard.run_strict(self._execute_lua, text)
+        finally:
+            self._current_document = previous
+
+    def _execute_lua(self, source: str) -> object:
+        name = "@" + self._current_document.as_posix() if self._current_document else "mushclient"
+        return self._lua.execute(source, name=name)
+
+    def _index_pack_files(self) -> dict[str, list[Path]]:
+        if self._file_index is not None:
+            return self._file_index
+        index: dict[str, list[Path]] = {}
+        if self._base_dir:
+            base = Path(self._base_dir).resolve()
+            for path in sorted(base.rglob("*")):
+                try:
+                    resolved = path.resolve()
+                except OSError:
+                    continue
+                if resolved.is_file() and resolved.is_relative_to(base):
+                    index.setdefault(resolved.name.casefold(), []).append(resolved)
+        self._file_index = index
+        return index
+
+    def _resolve_pack_file(self, filename: str) -> Path | None:
+        """Resolve Windows-style, case-insensitive pack paths without escaping the pack."""
+        if not self._base_dir or not filename:
+            return None
+        base = Path(self._base_dir).resolve()
+        normalized = filename.replace("\\", "/")
+        normalized = re.sub(r"^[A-Za-z]:", "", normalized)
+        requested = Path(normalized)
+        direct: list[Path] = []
+        if requested.is_absolute():
+            direct.append(requested)
+        if self._current_document is not None:
+            direct.append(self._current_document.parent / normalized)
+        direct.append(base / normalized.lstrip("/"))
+        for candidate in direct:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved.is_file() and resolved.is_relative_to(base):
+                return resolved
+
+        basename = Path(normalized).name.casefold()
+        matches = self._index_pack_files().get(basename, [])
+        wanted = tuple(part.casefold() for part in Path(normalized).parts if part not in ("/", "."))
+
+        def rank(path: Path) -> tuple[int, str]:
+            rel = tuple(part.casefold() for part in path.relative_to(base).parts)
+            suffix_match = bool(wanted) and rel[-len(wanted):] == wanted
+            return (0 if suffix_match else 1, path.as_posix())
+
+        return min(matches, key=rank) if matches else None
+
+    def _resolve_pack_directory(self, value: str) -> Path | None:
+        """Resolve a possibly-not-yet-created directory while confining it to the pack."""
+        if not self._base_dir or not value:
+            return None
+        base = Path(self._base_dir).resolve()
+        normalized = re.sub(r"^[A-Za-z]:", "", value.replace("\\", "/"))
+        requested = Path(normalized)
+        candidate = requested if requested.is_absolute() else (self._client_dir or base) / requested
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return None
+        return resolved if resolved.is_relative_to(base) else None
+
+    def _plugin_metadata(self, path: Path) -> tuple[str, str, str]:
+        """Return (id, name, language) from a plugin XML file, or empty values."""
+        try:
+            xml = path.read_text(encoding="latin-1", errors="ignore")
+            xml = re.sub(r"<\?xml[^>]*\?>", "", xml)
+            root = ET.fromstring(_sanitize_attr_markup(xml))
+        except (OSError, ET.ParseError):
+            return "", "", ""
+        plugin = next(root.iter("plugin"), None)
+        if plugin is None:
+            return "", "", ""
+        return (
+            plugin.get("id", ""),
+            plugin.get("name", "") or path.stem,
+            plugin.get("language", ""),
+        )
+
+    def _find_plugin_by_id(self, plugin_id: str) -> Path | None:
+        if self._plugin_file_by_id is None:
+            index: dict[str, Path] = {}
+            seen: set[Path] = set()
+            for paths in self._index_pack_files().values():
+                for path in paths:
+                    if path in seen or path.suffix.casefold() != ".xml":
+                        continue
+                    seen.add(path)
+                    candidate_id, _name, _language = self._plugin_metadata(path)
+                    if candidate_id:
+                        index.setdefault(candidate_id, path)
+            self._plugin_file_by_id = index
+        return self._plugin_file_by_id.get(plugin_id)
+
+    def _plugin_skip_reason(self, path: Path) -> str | None:
+        replacement = _HOST_PLUGIN_REPLACEMENTS.get(path.name.casefold())
+        if replacement:
+            return replacement
+        if path.suffix.lower() in _NON_LUA_SCRIPT_SUFFIXES:
+            return f"requires unsupported {path.suffix[1:].upper()} scripting"
+        _plugin_id, _name, language = self._plugin_metadata(path)
+        if language and language.casefold() != "lua":
+            return f"requires unsupported {language} scripting"
+        return None
+
+    def _mark_virtual_plugin(self, path: Path) -> None:
+        plugin_id, name, _language = self._plugin_metadata(path)
+        if plugin_id:
+            self._plugin_info[plugin_id] = {
+                "name": name,
+                "path": path,
+                "enabled": True,
+            }
+
+    def _skip_plugin(self, name: str, reason: str) -> None:
+        item = (name, reason)
+        if item not in self._skipped_plugins:
+            self._skipped_plugins.append(item)
+
+    def _record_optional_plugins(self) -> None:
+        rawget = self._lua.eval("rawget")
+        table = rawget(self._lua.globals(), "optional_plugins")
+        if table is None:
+            return
+        try:
+            names = [str(name) for _plugin_id, name in table.items()]
+        except (AttributeError, TypeError):
+            return
+        loaded_names = {str(info["name"]).casefold() for info in self._plugin_info.values()}
+        for name in sorted(names, key=str.casefold):
+            if name.casefold() not in loaded_names:
+                self._skip_plugin(name + ".xml", "declared optional by the pack")
+
     def _load_plugin(self, root: ET.Element) -> None:
         """Run one plugin/world's script + triggers; a world (<include>s) pulls in its
         plugins so they share this runtime and can ppi-message each other."""
         plugin = next(root.iter("plugin"), None)
         previous = self._current_plugin
-        self._current_plugin = (plugin.get("id") if plugin is not None else "") or "world"
-        script = "\n".join((el.text or "") for el in root.iter("script"))
-        if script.strip():
-            self._guard.run_strict(self._lua.execute, script)
-        for element in root.iter("trigger"):
-            self._register(element, is_alias=False)
-        for element in root.iter("alias"):
-            self._register(element, is_alias=True)
-        self._capture_hooks()
-        self._current_plugin = previous
+        plugin_id = (plugin.get("id") if plugin is not None else "") or "world"
+        self._current_plugin = plugin_id
+        if plugin is not None and plugin_id != "world":
+            plugin_name = plugin.get("name", "")
+            if not plugin_name and self._current_document is not None:
+                plugin_name = self._current_document.stem
+            self._plugin_info[plugin_id] = {
+                "name": plugin_name,
+                "path": self._current_document,
+                "enabled": True,
+            }
+        try:
+            # Non-plugin includes are Lua/constants fragments and must exist before the
+            # containing script executes. Plugin includes load afterward as independent
+            # plugin units, matching MUSHclient's dependency order.
+            for include in root.iter("include"):
+                name = include.get("name")
+                if name and include.get("plugin", "n").lower() != "y":
+                    try:
+                        self._load_included(name)
+                    except Exception as exc:  # noqa: BLE001 - account for one bad fragment
+                        self._include_errors.append((name, f"{type(exc).__name__}: {exc}"))
+            world = next(root.iter("world"), None)
+            if world is not None:
+                self._world_id = world.get("id") or self._world_id
+                self._world_name = world.get("name", self._world_name)
+                self._world_address = world.get("site", self._world_address)
+                try:
+                    self._world_port = int(world.get("port", self._world_port))
+                except (TypeError, ValueError):
+                    pass
+            script_filename = world.get("script_filename", "") if world is not None else ""
+            if script_filename:
+                target = self._resolve_pack_file(script_filename)
+                if target is None:
+                    self._skip_plugin(
+                        script_filename, "external world script is not bundled with the pack"
+                    )
+                else:
+                    try:
+                        self._load_path(target)
+                    except Exception as exc:  # noqa: BLE001 - XML rules can still be useful
+                        self._external_script_errors.append(
+                            (script_filename, f"{type(exc).__name__}: {exc}")
+                        )
+            script = "\n".join((el.text or "") for el in root.iter("script"))
+            if script.strip():
+                self._guard.run_strict(self._execute_lua, script)
+            for is_alias, tag in ((False, "trigger"), (True, "alias")):
+                for element in root.iter(tag):
+                    try:
+                        self._register(element, is_alias=is_alias)
+                    except Exception as exc:  # noqa: BLE001 - one malformed rule is not the pack
+                        label = element.get("name") or element.get("match") or "(unnamed)"
+                        self._rule_errors.append((label, f"{type(exc).__name__}: {exc}"))
+            self._capture_hooks()
+        finally:
+            self._current_plugin = previous
         for include in root.iter("include"):
             name = include.get("name")
-            if not name:
+            if not name or include.get("plugin", "n").lower() != "y":
                 continue
             try:
                 self._load_included(name)
@@ -765,25 +1772,19 @@ class MushclientPack:
                 self._include_errors.append((name, f"{type(exc).__name__}: {exc}"))
 
     def _load_included(self, filename: str) -> None:
-        if not self._base_dir or not filename:
+        target = self._resolve_pack_file(filename)
+        if target is None:
+            self._skip_plugin(filename, "not bundled with the pack")
             return
-        base = Path(self._base_dir).resolve()
-        # Match by filename (layouts vary). Escape glob metachars so a literal name like
-        # "a[1].xml" isn't read as a pattern, and confirm each hit is a real file under the
-        # pack dir (rglob can surface a symlink or directory outside it).
-        target = None
-        for match in sorted(base.rglob(glob.escape(Path(filename).name))):
-            try:
-                resolved = match.resolve()
-            except OSError:
-                continue
-            if resolved.is_file() and resolved.is_relative_to(base):
-                target = resolved
-                break
-        if target is None or target in self._loaded_includes:  # dedup by file (dirs share names)
+        if target in self._loaded_includes:  # dedup by file (dirs share names)
             return
         self._loaded_includes.add(target)
-        self.load_source(target.read_text(encoding="latin-1", errors="ignore"))
+        reason = self._plugin_skip_reason(target)
+        if reason:
+            self._mark_virtual_plugin(target)
+            self._skip_plugin(filename, reason)
+            return
+        self._load_path(target)
 
     # --- plugin lifecycle ---
 
@@ -813,7 +1814,8 @@ class MushclientPack:
         Lua-side adapter (``caller(fn, *args)``) for arguments that can't cross the
         lupa boundary as-is (byte payloads).
         """
-        for plugin_id, hooks in self._hooks.items():
+        # A list-changed hook can load more plugins, mutating _hooks during dispatch.
+        for plugin_id, hooks in list(self._hooks.items()):
             fn = hooks.get(name)
             if fn is None:
                 continue
@@ -825,6 +1827,9 @@ class MushclientPack:
                 else:
                     self._guard.run_strict(fn, *args)
             except Exception as exc:  # noqa: BLE001 - one plugin's hook must not stop the rest
+                item = (f"{plugin_id}.{name}", f"{type(exc).__name__}: {exc}")
+                if item not in self._hook_errors:
+                    self._hook_errors.append(item)
                 diag = self._api.diag
                 if diag is not None:
                     diag.event("plugin.dispatch", hook=name, plugin=plugin_id,
@@ -845,6 +1850,25 @@ class MushclientPack:
     def dispatch_connect(self) -> None:
         self.dispatch("OnPluginConnect")
 
+    def dispatch_line(self, line: str) -> None:
+        self.dispatch("OnPluginLineReceived", line)
+
+    def dispatch_gmcp(self, package: str, value: object) -> None:
+        """Expose parsed GMCP data and mirror GMCP_handler_NJG's plugin broadcast."""
+        root = package.casefold()
+        self._gmcp_values[root] = value
+
+        def flatten(prefix: str, item: object) -> None:
+            if not isinstance(item, dict):
+                return
+            for key, child in item.items():
+                child_path = f"{prefix}.{str(key).casefold()}"
+                self._gmcp_values[child_path] = child
+                flatten(child_path, child)
+
+        flatten(root, value)
+        self.dispatch("OnPluginBroadcast", 1, _GMCP_HANDLER_ID, "GMCP_handler_NJG", root)
+
     def dispatch_telnet_request(self, option: int, message: str) -> None:
         """``OnPluginTelnetRequest(option, "WILL"/"SENT_DO")`` -- the SENT_DO round is
         where MSDP packs send their REPORT list; without it the server streams nothing."""
@@ -860,8 +1884,6 @@ class MushclientPack:
 
     def _register(self, element: ET.Element, *, is_alias: bool) -> None:
         attrs = element.attrib
-        if attrs.get("enabled", "y") != "y":
-            return
         pattern = attrs.get("match", "")
         regex = attrs.get("regexp", "n") == "y"
         try:  # a malformed sequence attribute must not abort the whole world load
@@ -871,13 +1893,25 @@ class MushclientPack:
         keep_default = "n" if is_alias else "y"  # aliases consume by default
         keep = attrs.get("keep_evaluating", keep_default) == "y"
         callback = self._make_callback(element, attrs)
+        state: dict[str, object] = {
+            "kind": "alias" if is_alias else "trigger",
+            "name": attrs.get("name", ""),
+            "group": attrs.get("group", ""),
+            "enabled": attrs.get("enabled", "y") == "y",
+        }
+        self._xml_rules.append(state)
+
+        def gated(ctx: MatchContext) -> None:
+            if state["enabled"]:
+                callback(ctx)
+
         if is_alias:
             self._api.add_alias(
-                pattern, callback, regex=regex, priority=priority, keep_evaluating=keep
+                pattern, gated, regex=regex, priority=priority, keep_evaluating=keep
             )
         else:
             self._api.add_trigger(
-                pattern, callback, regex=regex, priority=priority, keep_evaluating=keep
+                pattern, gated, regex=regex, priority=priority, keep_evaluating=keep
             )
 
     def _make_callback(self, element: ET.Element, attrs: dict[str, str]):
@@ -947,6 +1981,10 @@ def _sanitize_attr_markup(xml: str) -> str:
 
 
 def _escape_attr_values(segment: str) -> str:
+    # A few hand-edited packs omit the required whitespace between adjacent attributes
+    # (`send_to="12"sequence="100"`). MUSHclient accepts that; ElementTree does not.
+    segment = re.sub(r'"(?=[A-Za-z_:][\w:.-]*\s*=)', '" ', segment)
+
     def fix(match: re.Match[str]) -> str:
         value = _BARE_AMP_RE.sub("&amp;", match.group(1)).replace("<", "&lt;")
         return f'="{value}"'

@@ -39,6 +39,13 @@ def test_registry_matches_erion_by_mud_and_name():
     assert git_sources.for_labels("Some Other MUD") is None
 
 
+def test_registry_routes_chatmud_to_canonical_git_source():
+    source = git_sources.for_labels("ChatMud", "Chatpack")
+    assert source.id == "chatpack"
+    assert source.entry == "chatpack/worlds/ChatMud.MCL"
+    assert source.archive_urls[0].endswith("chatpack-master.zip")
+
+
 def test_setup_from_git_installs_under_curated_id(tmp_path):
     store = PackStore(tmp_path / "store")
     source = git_sources.by_id("erion")
@@ -67,6 +74,20 @@ def test_setup_from_git_falls_back_master_to_main(tmp_path):
     result = setup_pack_from_git(store, source, download=_downloader({urls[1]: main_archive}))
     assert result.manifest.id == "erion"
     assert store.entry_path("erion").name == "Erion MUD.mcl"
+
+
+def test_setup_from_git_rejects_html_before_trying_next_archive(tmp_path):
+    store = PackStore(tmp_path / "store")
+    source = git_sources.by_id("erion")
+    urls = vault.git_archive_urls(source.repo_url)
+    result = setup_pack_from_git(
+        store,
+        source,
+        download=_downloader(
+            {urls[0]: b"<html>sign in</html>", urls[1]: _archive(tmp_path / "a.zip")}
+        ),
+    )
+    assert result.manifest.id == "erion"
 
 
 def test_setup_from_git_reinstall_replaces_in_place(tmp_path):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,8 @@ PPI_PLUGIN = """<?xml version="1.0"?>
 <script><![CDATA[
 local ppi = require "ppi"
 function play(file) Sound(file) end
+ppi.unload()
+ppi.init()
 ppi.Expose("play")
 SomeUnimplementedHostFunc()  -- permissive fallback must no-op, not crash the load
 ]]></script></muclient>"""
@@ -116,6 +119,26 @@ def test_ppi_shim_exposes_and_permissive_globals_no_op():
     pack = MushclientPack(ScriptApi(engine, source="m", base_dir="/tmp"))
     pack.load_source(PPI_PLUGIN)  # loads despite the unimplemented host call
     assert "play" in pack._exposed["audio"]  # exposed under its own plugin id
+
+
+def test_ppi_loads_required_bundled_plugin_by_id(tmp_path):
+    (tmp_path / "audio.xml").write_text(
+        '<muclient><plugin name="audio" id="audio-id"/><script><![CDATA['
+        'local ppi = require("ppi"); function unload() Send("unloaded") end; '
+        'ppi.Expose("unload", unload)]]></script></muclient>',
+        encoding="latin-1",
+    )
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        '<muclient><plugin id="main"/><script><![CDATA['
+        'local ppi = require("ppi").Load("audio-id"); ppi.unload()'
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["unloaded"]
+    assert pack._plugin_info["audio-id"]["name"] == "audio"
 
 
 def test_include_pulls_in_plugin(tmp_path):
@@ -182,6 +205,41 @@ def test_full_stdlib_keeps_stdlib_but_closes_escape_hatches(tmp_path):
     assert {"stdlib", "loadlib-noop-ran", "no-getregistry", "no-sethook"} <= set(sink.sent)
 
 
+def test_full_stdlib_normalizes_legacy_file_read_modes(tmp_path):
+    (tmp_path / "help.txt").write_text("first\nsecond\n", encoding="latin-1")
+    sink = RecordingSink()
+    MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path)),
+        full_stdlib=True,
+    ).load_source(
+        "<muclient><script><![CDATA["
+        "local f = io.open(GetInfo(66) .. 'help.txt', 'r'); "
+        "local first, second = f:read('l*', 'l*'); f:close(); Send(first .. ':' .. second)"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["first:second"]
+
+
+def test_full_stdlib_anchors_relative_io_to_pack(tmp_path, monkeypatch):
+    pack_dir = tmp_path / "pack"
+    process_dir = tmp_path / "process"
+    pack_dir.mkdir()
+    process_dir.mkdir()
+    monkeypatch.chdir(process_dir)
+
+    MushclientPack(
+        ScriptApi(AutomationEngine(RecordingSink()), source="m", base_dir=str(pack_dir)),
+        full_stdlib=True,
+    ).load_source(
+        "<muclient><script><![CDATA["
+        "local f = assert(io.open('Config.txt', 'w')); f:write('pack-local'); f:close()"
+        "]]></script></muclient>"
+    )
+
+    assert (pack_dir / "Config.txt").read_text(encoding="utf-8") == "pack-local"
+    assert not (process_dir / "Config.txt").exists()
+
+
 def test_send_to_script_substitutes_wildcards():
     # MUSHclient send-to-script (send_to=12) substitutes %1.. into the script text before
     # running it; a bare %1 (Repeat_Command's "for i=1,%1") must not break compilation.
@@ -235,6 +293,148 @@ def test_malformed_included_plugin_does_not_sink_the_pack(tmp_path):
     engine.process_line(Line("ping"))
     assert "pong" in sink.sent  # the good plugin loaded despite the bad sibling
     assert any(name == "bad.xml" for name, _ in pack._include_errors)
+
+
+def test_one_malformed_rule_is_skipped_without_losing_siblings():
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    pack = MushclientPack(ScriptApi(engine, source="m"))
+    pack.load_source(
+        "<muclient><triggers>"
+        '<trigger match="bad" enabled="y" send_to="12"><send>not valid lua.</send></trigger>'
+        '<trigger match="good" enabled="y" send_to="12"><send>Send("ok")</send></trigger>'
+        "</triggers></muclient>"
+    )
+    engine.process_line(Line("good"))
+    assert sink.sent == ["ok"]
+    assert pack._rule_errors and pack._rule_errors[0][0] == "bad"
+
+
+def test_repairs_missing_attribute_space_and_exposes_sendto_constants():
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    pack = MushclientPack(ScriptApi(engine, source="m"))
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "assert(sendto.world == 0 and sendto.execute == 10 and sendto.script == 12)"
+        "]]></script><triggers>"
+        '<trigger match="ping" enabled="y" send_to="12"sequence="100">'
+        '<send>Send("pong")</send></trigger></triggers></muclient>'
+    )
+    engine.process_line(Line("ping"))
+    assert sink.sent == ["pong"]
+
+
+def test_disabled_xml_group_can_be_enabled_by_install_hook():
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    pack = MushclientPack(ScriptApi(engine, source="m"))
+    pack.load_source(
+        "<muclient><plugin name='p' id='p'/><script><![CDATA["
+        "function OnPluginInstall() EnableTriggerGroup('sounds', true) end"
+        "]]></script><triggers>"
+        '<trigger match="ping" group="sounds" enabled="n" send_to="12">'
+        '<send>Send("pong")</send></trigger></triggers></muclient>'
+    )
+    engine.process_line(Line("ping"))
+    assert sink.sent == []
+    pack.dispatch_install()
+    engine.process_line(Line("ping"))
+    assert sink.sent == ["pong"]
+
+
+def test_world_external_script_and_windows_case_insensitive_include(tmp_path):
+    plugins = tmp_path / "Worlds" / "Plugins"
+    scripts = tmp_path / "Worlds" / "Scripts"
+    plugins.mkdir(parents=True)
+    scripts.mkdir(parents=True)
+    (scripts / "Core.LUA").write_text(
+        "function external() Send('external') end", encoding="latin-1"
+    )
+    (plugins / "Sound.XML").write_text(
+        "<muclient><triggers><trigger match='plugin' enabled='y' script='external'/>"
+        "</triggers></muclient>",
+        encoding="latin-1",
+    )
+    world = tmp_path / "Worlds" / "world.MCL"
+    world.write_text(
+        '<muclient><world script_filename="worlds\\scripts\\core.lua"/>'
+        '<include name="worlds\\plugins\\sound.xml" plugin="y"/></muclient>',
+        encoding="latin-1",
+    )
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    pack = MushclientPack(ScriptApi(engine, source="m", base_dir=str(tmp_path)))
+    pack.load_file(str(world))
+    engine.process_line(Line("plugin"))
+    assert sink.sent == ["external"]
+    assert pack._external_script_errors == []
+
+
+def test_missing_world_script_is_accounted_for_without_failing_xml_rules(tmp_path):
+    world = tmp_path / "world.MCL"
+    world.write_text(
+        '<muclient><world script_filename="worlds\\missing.lua"/><triggers>'
+        '<trigger match="ping" enabled="y" send_to="12"><send>Send("pong")</send></trigger>'
+        "</triggers></muclient>",
+        encoding="latin-1",
+    )
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    pack = MushclientPack(ScriptApi(engine, source="m", base_dir=str(tmp_path)))
+    pack.load_file(str(world))
+    engine.process_line(Line("ping"))
+    assert sink.sent == ["pong"]
+    assert pack._external_script_errors == []
+    assert pack._skipped_plugins == [
+        ("worlds\\missing.lua", "external world script is not bundled with the pack")
+    ]
+
+
+def test_dependency_manager_loads_required_and_accounts_for_optional(tmp_path):
+    (tmp_path / "sound.xml").write_text(
+        "<muclient><plugin name='sound' id='sound'/><triggers>"
+        '<trigger match="ding" enabled="y" send_to="12"><send>Send("loaded")</send></trigger>'
+        "</triggers></muclient>",
+        encoding="latin-1",
+    )
+    (tmp_path / "optional.xml").write_text(
+        "<muclient><plugin name='optional' id='optional'/></muclient>", encoding="latin-1"
+    )
+    (tmp_path / "requirements.xml").write_text(
+        "<muclient><plugin name='requirements' id='requirements'/><script><![CDATA["
+        "optional_plugins = { optional = 'optional' }\n"
+        "function OnPluginListChanged() "
+        "LoadPlugin(GetPluginInfo(GetPluginID(), 20) .. 'sound.xml') end"
+        "]]></script></muclient>",
+        encoding="latin-1",
+    )
+    world = tmp_path / "world.MCL"
+    world.write_text(
+        '<muclient><include name="requirements.xml" plugin="y"/></muclient>', encoding="latin-1"
+    )
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    pack = MushclientPack(ScriptApi(engine, source="m", base_dir=str(tmp_path)))
+    pack.load_file(str(world))
+    engine.process_line(Line("ding"))
+    assert sink.sent == ["loaded"]
+    assert ("optional.xml", "declared optional by the pack") in pack._skipped_plugins
+
+
+def test_gmcp_helper_broadcast_exposes_nested_values():
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    pack = MushclientPack(ScriptApi(engine, source="m"))
+    pack.load_source(
+        "<muclient><plugin name='sounds' id='sounds'/><script><![CDATA["
+        "function OnPluginBroadcast(msg, id, name, text) "
+        "if text == 'comm.channel' and gmcp('comm.channel.msg') == 'hello' "
+        "then Send('gmcp-ok') end end"
+        "]]></script></muclient>"
+    )
+    pack.dispatch_gmcp("Comm.Channel", {"msg": "hello"})
+    assert sink.sent == ["gmcp-ok"]
 
 
 def test_sound_plays_file():
@@ -293,6 +493,299 @@ def test_get_info_anchors_on_the_world_dir_not_pack_root(tmp_path):
     played = sink.played[0]["file"].replace("\\", "/")  # normalize separators for a portable check
     assert played.endswith("MUSHclient/worlds/sounds/boom.wav")  # beside the world, not the root
     assert "//" not in played  # the doubled-slash join was collapsed
+
+
+def test_get_info_distinguishes_client_and_world_directories(tmp_path):
+    client = tmp_path / "portable-client"
+    worlds = client / "worlds"
+    worlds.mkdir(parents=True)
+    world = worlds / "w.MCL"
+    world.write_text(
+        '<muclient><world id="0123456789abcdef01234567" name="Test MUD" '
+        'site="mud.example" port="4000"/><script><![CDATA['
+        "Send(GetInfo(56)); Send(GetInfo(66)); Send(GetInfo(67)); "
+        "Send(Version()); Send(GetInfo(72)); "
+        "local id = GetUniqueID(); Send(type(id) .. ':' .. #id); "
+        "Send(GetWorldID()); Send(WorldName() .. ':' .. WorldAddress() .. ':' .. WorldPort()); "
+        "Send(GetInfo(1) .. ':' .. GetInfo(2)); Send(GetWorldList()[1]); "
+        "Send('[' .. Trim(' x ') .. ']')"
+        "]]></script></muclient>",
+        encoding="latin-1",
+    )
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+
+    pack.load_file(str(world))
+
+    assert sink.sent == [
+        client.as_posix() + "/",
+        client.as_posix() + "/",
+        worlds.as_posix() + "/",
+        "5.06",
+        "5.06",
+        "string:24",
+        "0123456789abcdef01234567",
+        "Test MUD:mud.example:4000",
+        "mud.example:Test MUD",
+        "Test MUD",
+        "[x]",
+    ]
+
+
+def test_host_speech_plugin_is_virtual_and_accounted_for(tmp_path):
+    plugin = tmp_path / "Sapi_speaker.xml"
+    plugin.write_text(
+        '<muclient><plugin name="Sapi_speaker" id="speech"/>'
+        '<script><![CDATA[function OnPluginInstall() Send("wrong") end]]></script></muclient>',
+        encoding="latin-1",
+    )
+    world = tmp_path / "world.MCL"
+    world.write_text(
+        '<muclient><include name="Sapi_speaker.xml" plugin="y"/></muclient>',
+        encoding="latin-1",
+    )
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+
+    pack.load_file(str(world))
+    pack.dispatch_install()
+
+    assert sink.sent == []
+    assert pack._plugin_info["speech"]["enabled"] is True
+    assert pack._skipped_plugins == [
+        ("Sapi_speaker.xml", "genericMud owns automatic speech output")
+    ]
+
+
+def test_world_and_global_options_return_scalar_host_values(tmp_path):
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "Send(tostring(GetOption('enable_triggers'))); "
+        "SetOption('enable_triggers', 0); Send(tostring(GetOption('enable_triggers'))); "
+        "Send(tostring(GetGlobalOption('F1macro'))); "
+        "Send(tostring(#GetGlobalOptionList()))"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["1", "0", "1", "0"]
+
+
+def test_standard_error_codes_and_variable_mutations_return_ok(tmp_path):
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "Send(tostring(error_code.eOK)); Send(tostring(SetVariable('x', '1'))); "
+        "Send(tostring(DeleteVariable('x'))); Send(tostring(EnableTimer('t', true)))"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["0", "0", "0", "0"]
+
+
+def test_unique_numbers_and_named_timer_callbacks(tmp_path):
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "wait = {}; function wait.resume(name) Send(name) end; "
+        "Send(tostring(GetUniqueNumber())); Send(tostring(GetUniqueNumber())); "
+        "AddTimer('wake', 0, 0, 0.1, '', "
+        "bit.bor(timer_flag.Enabled, timer_flag.OneShot), 'wait.resume')"
+        "]]></script></muclient>"
+    )
+    sink.run_pending()
+    assert sink.sent == ["1", "2", "wake"]
+
+
+def test_utils_split_and_readdir_match_mushclient_shapes(tmp_path):
+    sounds = tmp_path / "sounds"
+    sounds.mkdir()
+    (sounds / "hit1.ogg").write_bytes(b"OggS")
+    (sounds / "hit2.ogg").write_bytes(b"OggS-more")
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "local version = utils.split('3.1', '.'); Send(version[1]); "
+        "local files = utils.readdir('sounds/hit*.ogg'); "
+        "Send(tostring(files['hit1.ogg'].size)); "
+        "Send(tostring(files['hit2.ogg'].directory)); "
+        "Send(tostring(utils.readdir('sounds/missing*.ogg') == nil))"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["3", "4", "false", "true"]
+
+
+def test_miriani_bass_module_routes_stream_to_sound_bus(tmp_path):
+    sound = tmp_path / "sounds" / "hit.ogg"
+    sound.parent.mkdir()
+    sound.write_bytes(b"OggS")
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "local bass = require('miriani.lib.audio.bass')(); "
+        "local stream = bass:StreamCreateFile(false, 'sounds/hit.ogg', 0, 0, 4); "
+        "bass:SetAttribute(stream, 2, 0.4); bass:SetAttribute(stream, 3, -0.5); "
+        "stream:Play()"
+        "]]></script></muclient>"
+    )
+    assert sink.played == [
+        {
+            "file": str(sound),
+            "channel": "mush-bass-1",
+            "gain": 0.4,
+            "pan": -0.5,
+            "loop": True,
+        }
+    ]
+
+
+def test_json_bridge_decodes_and_encodes_without_native_lpeg(tmp_path):
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "require('json'); "
+        "local value = json.decode('{\"patch\":5,\"items\":[\"a\",\"b\"]}'); "
+        "Send(value.patch .. ':' .. value.items[2]); "
+        "local roundtrip = json.decode(json.encode({name='Miriani', enabled=true})); "
+        "Send(roundtrip.name .. ':' .. tostring(roundtrip.enabled)); "
+        "Send(type(require('socket').gettime()))"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["5:b", "Miriani:true", "number"]
+
+
+def test_socket_http_downloads_binary_cue_and_confined_mkdir(tmp_path, monkeypatch):
+    class Response:
+        status = 200
+        reason = "OK"
+        headers = {"Content-Length": "3", "Content-Type": "audio/ogg"}
+
+        def __init__(self):
+            self._body = bytearray((0, 255, 65))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def getcode(self):
+            return self.status
+
+        def read(self, size):
+            chunk = bytes(self._body[:size])
+            del self._body[:size]
+            return chunk
+
+    monkeypatch.setattr(
+        "genericmud.scripting.mushclient_compat._open_http", lambda _url: Response()
+    )
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path)),
+        full_stdlib=True,
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "local dir = GetInfo(66) .. 'sounds/ogg/ships/combat/'; "
+        "os.execute('mkdir \"' .. dir .. '\" 2>nul'); "
+        "require('socket.http'); require('ltn12'); local body = {}; "
+        "local ok, status, headers, reason = "
+        "socket.http.request{url='https://example.test/bomb.ogg', "
+        "sink=ltn12.sink.table(body)}; "
+        "local file = io.open(dir .. 'bomb.ogg', 'wb'); "
+        "file:write(table.concat(body)); file:close(); "
+        "Send(tostring(ok) .. ':' .. status .. ':' .. tostring(reason))"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["1:200:OK"]
+    assert (tmp_path / "sounds" / "ogg" / "ships" / "combat" / "bomb.ogg").read_bytes() == bytes(
+        (0, 255, 65)
+    )
+
+
+def test_bundled_penlight_sees_pack_files_through_confined_lfs(tmp_path):
+    (tmp_path / "pl").mkdir()
+    # Minimal path module exercises the same `lfs.attributes(path, 'mode')` contract.
+    (tmp_path / "pl" / "path.lua").write_text(
+        "local lfs = require('lfs'); return {"
+        "isfile=function(p) return lfs.attributes(p, 'mode') == 'file' end}",
+        encoding="latin-1",
+    )
+    sound = tmp_path / "sounds" / "hit.ogg"
+    sound.parent.mkdir()
+    sound.write_bytes(b"OggS")
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "local path = require('pl.path'); Send(tostring(path.isfile('sounds/hit.ogg')))"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["true"]
+
+
+def test_sqlite_bridge_reads_named_rows_and_rejects_escape(tmp_path):
+    database = tmp_path / "locations.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE locations (uid INTEGER, name TEXT)")
+        connection.execute("INSERT INTO locations VALUES (7, 'Market Square')")
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "local db = assert(sqlite3.open(GetInfo(66) .. 'locations.db')); "
+        "for row in db:nrows('SELECT uid, name FROM locations') do "
+        "Send(tostring(row.uid) .. ':' .. row.name) end; "
+        "Send(tostring(sqlite3.open('../outside.db') == nil)); db:close()"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["7:Market Square", "true"]
+
+
+def test_sqlite_bridge_prepared_statement_round_trip(tmp_path):
+    database = tmp_path / "history.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE messages (category TEXT, body TEXT)")
+    sink = RecordingSink()
+    pack = MushclientPack(
+        ScriptApi(AutomationEngine(sink), source="m", base_dir=str(tmp_path))
+    )
+    pack.load_source(
+        "<muclient><script><![CDATA["
+        "local db = sqlite3.open(GetInfo(66) .. 'history.db'); "
+        "local put = db:prepare('INSERT INTO messages VALUES (?, ?)'); "
+        "put:bind_values('tell', 'hello'); Send(tostring(put:step())); put:finalize(); "
+        "local get = db:prepare('SELECT category, body FROM messages'); "
+        "Send(tostring(get:step())); local row = get:get_named_values(); "
+        "Send(row.category .. ':' .. row.body); get:finalize(); db:close()"
+        "]]></script></muclient>"
+    )
+    assert sink.sent == ["101", "100", "tell:hello"]
 
 
 def test_sppath_defaults_to_pack_dir_for_the_sounds_fallback(tmp_path):
@@ -566,12 +1059,8 @@ def test_hooks_are_captured_per_plugin_and_do_not_leak(tmp_path):
     assert sink.sent == ["alpha", "beta"]  # both ran, in load order
 
 
-def test_loadlib_bootstrap_does_not_abort_install(tmp_path):
-    """Erion's LuaAudio and mushReader open OnPluginInstall with
-    `assert(package.loadlib(dll, sym))()`. When loadlib was nil that assert threw and
-    the rest of the hook (LuaAudio's volume defaults; mushReader's nvda.stop/say) never
-    ran -- the two `loadlib (a nil value)` errors in the crash-day diagnostic log. The
-    no-op loader + black-holed `nvda` must let both hooks run to completion silently."""
+def test_loadlib_bootstrap_runs_for_audio_while_host_speech_is_virtual(tmp_path):
+    """LuaAudio remains productive, while redundant MushReader is represented virtually."""
     (tmp_path / "luaaudio.xml").write_text(
         '<muclient><plugin id="luaaudio"/><script><![CDATA[\n'
         "function OnPluginInstall()\n"
@@ -599,9 +1088,11 @@ def test_loadlib_bootstrap_does_not_abort_install(tmp_path):
         '<include name="mushreader.xml" plugin="y"/></muclient>',
     )
     pack.dispatch_install()
-    # Both hooks reached their tail Send -> the loadlib assert passed and nvda.* no-op'd.
-    assert sink.sent == ["luaaudio-installed", "mushreader-installed"]
+    assert sink.sent == ["luaaudio-installed"]
     assert pack._api.get_var("vol") == "100"
+    assert ("mushreader.xml", "genericMud owns automatic speech output") in (
+        pack._skipped_plugins
+    )
 
 
 def test_execute_runs_aliases_before_the_wire(tmp_path):
@@ -686,6 +1177,18 @@ def test_accelerator_binds_pack_hotkeys(tmp_path):
     assert sink.sent == ["score hp", "look"]  # no alias: straight to the wire
 
 
+def test_accelerator_to_binds_script_hotkey(tmp_path):
+    sink, engine, _pack = _make_pack(
+        tmp_path,
+        "<muclient><script><![CDATA["
+        "function report() Send('status') end; "
+        "world.AcceleratorTo('Ctrl + Shift + V', 'report()', sendto.script)"
+        "]]></script></muclient>",
+    )
+    assert engine.press_key("ctrl+shift+v")
+    assert sink.sent == ["status"]
+
+
 def test_addtriggerex_oneshot_and_replace(tmp_path):
     """Erion's F-key reports: the hotkey alias AddTriggerEx's a OneShot+Replace trigger
     (flags built with bit.bor over trigger_flag constants -- all previously black-holed)
@@ -757,6 +1260,7 @@ def test_failing_hook_is_isolated(tmp_path):
     )
     pack.dispatch_install()
     assert sink.sent == ["good"]
+    assert pack._hook_errors[0][0] == "bad.OnPluginInstall"
 
 
 def test_sent_do_round_sends_report_packet_verbatim(tmp_path):

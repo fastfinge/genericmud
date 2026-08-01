@@ -30,12 +30,27 @@ class GitSource:
     entry: str  # load script relative to the repo root (the archive's wrapper dir is stripped)
     world: World  # curated connection (the installer bundles more than one world)
     dialect: str = "mushclient"  # one of manifest.KNOWN_DIALECTS
+    archive_urls: tuple[str, ...] = ()  # nonstandard/self-hosted forge archive endpoints
 
 
 # Erion's installer clones gitlab.com/erion1/soundpack (~1 GB: a portable MUSHclient install).
 # The world file is MUSHclient/worlds/Erion MUD.mcl; connection is Erion MUD's published telnet
 # endpoint. Fetching the archive directly skips the installer .exe entirely.
 _SOURCES: dict[str, GitSource] = {
+    # The vault's preserved `chatpack.zip` currently contains the project web page, not an
+    # archive. Chatpack publishes the actual tree on its own GitLab instance.
+    "chatpack": GitSource(
+        id="chatpack",
+        name="Chatpack",
+        mud="ChatMud",
+        repo_url="https://git.chatmud.com/athlon/chatpack",
+        entry="chatpack/worlds/ChatMud.MCL",
+        world=World(name="ChatMud", host="chatmud.com", port=7777),
+        archive_urls=(
+            "https://git.chatmud.com/athlon/chatpack/-/archive/master/chatpack-master.zip",
+            "https://git.chatmud.com/athlon/chatpack/-/archive/main/chatpack-main.zip",
+        ),
+    ),
     "erion": GitSource(
         id="erion",
         name="Erion Mud Soundpack",

@@ -91,6 +91,14 @@ def test_exe_mirror_is_not_installable():
     assert best_download(dls) is None
 
 
+def test_prometheus_installer_gets_its_official_update_archive():
+    dls = pack_downloads(10, opener=_opener({f"{BASE_URL}/pack.php?id=10": EXE_ONLY_HTML.encode()}))
+    best = best_download(dls)
+    assert best is not None
+    assert best.role == "updater"
+    assert best.url.endswith("/Prometheus-update.zip")
+
+
 def test_download_streams_to_file_with_progress(tmp_path):
     data = b"hello sound" * 500
     seen: list[tuple[int, int]] = []

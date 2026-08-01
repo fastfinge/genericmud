@@ -40,6 +40,19 @@ def test_resolve_falls_back_to_sounds_folder_by_basename(tmp_path):
     assert api._resolve("boom.wav")[0] == str(real)
 
 
+def test_resolve_tolerates_an_upstream_doubled_extension(tmp_path):
+    pack, sounds = tmp_path / "pack", tmp_path / "sounds"
+    pack.mkdir()
+    sounds.mkdir()
+    real = sounds / "CrossbowFire2.wav.wav"
+    real.write_bytes(b"RIFF")
+    api = _api(str(pack))
+    api.set_var("sppath", str(sounds))
+    resolved, exists = api._resolve("Cogg\\Combat\\CrossbowFire2.wav")
+    assert exists
+    assert resolved == str(real)
+
+
 def test_resolve_finds_windows_authored_path_by_basename(tmp_path):
     pack, sounds = tmp_path / "pack", tmp_path / "snd"
     pack.mkdir()

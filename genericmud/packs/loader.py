@@ -60,6 +60,13 @@ class ActivationResult:
     failed: dict[str, str] = field(default_factory=dict)  # pack id -> error message
     conflicts: list[Conflict] = field(default_factory=list)
     skipped_untrusted: list[str] = field(default_factory=list)  # enabled but not trusted
+    # Compatibility decisions stay inspectable without turning optional/client-only plugins
+    # or one malformed upstream rule into a failed pack activation.
+    skipped_plugins: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    skipped_rules: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    plugin_errors: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    external_script_errors: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    module_errors: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     # Live dialect front-ends for the loaded packs, in load order. The app needs the
     # MUSHclient ones after activation to dispatch plugin lifecycle hooks
     # (OnPluginInstall/Connect and the telnet pair that carries MSDP).
@@ -104,6 +111,45 @@ def activate_world(
             result.loaded.append(manifest.id)
             if diag is not None:
                 diag.event("pack.load", id=manifest.id, dialect=manifest.dialect, status="loaded")
+            if isinstance(pack, MushclientPack):
+                if pack._skipped_plugins:
+                    result.skipped_plugins[manifest.id] = list(pack._skipped_plugins)
+                if pack._rule_errors:
+                    result.skipped_rules[manifest.id] = list(pack._rule_errors)
+                if pack._include_errors:
+                    result.plugin_errors[manifest.id] = list(pack._include_errors)
+                if pack._external_script_errors:
+                    result.external_script_errors[manifest.id] = list(
+                        pack._external_script_errors
+                    )
+                if pack._module_errors:
+                    result.module_errors[manifest.id] = list(pack._module_errors)
+                if diag is not None:
+                    for name, reason in pack._skipped_plugins:
+                        diag.event(
+                            "pack.plugin", id=manifest.id, name=name,
+                            status="skipped", reason=reason,
+                        )
+                    for name, reason in pack._include_errors:
+                        diag.event(
+                            "pack.plugin", id=manifest.id, name=name,
+                            status="failed", reason=reason,
+                        )
+                    for name, reason in pack._rule_errors:
+                        diag.event(
+                            "pack.rule", id=manifest.id, name=name,
+                            status="skipped", reason=reason,
+                        )
+                    for name, reason in pack._external_script_errors:
+                        diag.event(
+                            "pack.script", id=manifest.id, name=name,
+                            status="failed", reason=reason,
+                        )
+                    for name, reason in pack._module_errors:
+                        diag.event(
+                            "pack.module", id=manifest.id, name=name,
+                            status="failed", reason=reason,
+                        )
         except Exception as exc:  # noqa: BLE001 - one bad pack must not sink the others
             # Roll back anything it registered before raising: a half-loaded pack's triggers
             # would otherwise stay live and could gag/reroute/send with incomplete state.

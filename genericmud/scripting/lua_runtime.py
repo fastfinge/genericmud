@@ -127,7 +127,11 @@ def make_sandboxed_runtime(
 
 
 def install_pack_require(
-    lua: LuaRuntime, base_dir: str | None, builtins: dict | None = None, fallback: object = None
+    lua: LuaRuntime,
+    base_dir: str | None,
+    builtins: dict | None = None,
+    fallback: object = None,
+    on_error: Callable[[str, Path, Exception], None] | None = None,
 ) -> None:
     """Install a ``require()`` scoped to the pack directory (+ optional builtins).
 
@@ -142,7 +146,12 @@ def install_pack_require(
     builtins = dict(builtins or {})
     if not base_dir and not builtins and fallback is None:
         return
-    index = {path.name.lower(): path for path in Path(base_dir).rglob("*.lua")} if base_dir else {}
+    module_paths: list[tuple[str, Path]] = []
+    if base_dir:
+        root = Path(base_dir)
+        for path in sorted(root.rglob("*.lua"), key=lambda item: item.as_posix().casefold()):
+            relative = path.relative_to(root).with_suffix("")
+            module_paths.append((relative.as_posix().replace("/", ".").casefold(), path))
     cache: dict[str, object] = {}
     # Resolve package.loaded[key] via rawget so a black-hole _G.__index metatable (the
     # MUSHclient compat layer installs one) can't fool the lookup into a no-op table.
@@ -157,6 +166,19 @@ def install_pack_require(
     _global_module = lua.eval(
         "function(key) local v = rawget(_G, key); if type(v) == 'table' then return v end end"
     )
+    _legacy_module = lua.eval(
+        "function(key)"
+        " local current = _G;"
+        " for segment in string.gmatch(key, '[^.]+') do"
+        "  local child = rawget(current, segment);"
+        "  if type(child) ~= 'table' then child = {}; rawset(current, segment, child) end;"
+        "  current = child;"
+        " end;"
+        " setmetatable(current, {__index = _G});"
+        " if package and package.loaded then package.loaded[key] = current end;"
+        " return current"
+        " end"
+    )
 
     def _require(name: object = "", *_args: object) -> object:
         key = str(name)
@@ -164,8 +186,22 @@ def install_pack_require(
             return builtins[key]
         if key in cache:
             return cache[key]
-        target = key.replace(".", "/").rsplit("/", 1)[-1].lower() + ".lua"
-        path = index.get(target)
+        requested = key.replace("\\", ".").replace("/", ".").removesuffix(".lua").casefold()
+        candidates: list[tuple[int, str, Path]] = []
+        for module_name, candidate in module_paths:
+            import_names = [module_name]
+            if module_name.endswith(".init"):
+                import_names.append(module_name.removesuffix(".init"))
+            for import_name in import_names:
+                if import_name == requested:
+                    extra_segments = 0
+                elif import_name.endswith("." + requested):
+                    extra_segments = import_name.count(".") - requested.count(".")
+                else:
+                    continue
+                candidates.append((extra_segments, module_name, candidate))
+        path = min(candidates, default=None, key=lambda item: (item[0], item[1]))
+        path = path[2] if path is not None else None
         if path is None:
             stdlib = _loaded_module(key) or _global_module(key)  # require "string"/"table"/...
             if stdlib is not None:
@@ -180,18 +216,22 @@ def install_pack_require(
         cache[key] = None  # sentinel: break a require cycle before executing
         try:
             code = path.read_text(encoding="latin-1", errors="ignore")
-            result = lua.eval("function(...)\n" + code + "\nend")(key)
+            if code.startswith("#!"):
+                code = code.partition("\n")[2]
+            result = lua.eval("function(...)\n" + code + "\nend", name="@" + path.as_posix())(key)
         except ScriptTimeout:
             # A runaway loop in a required module is a real failure of a hostile/broken pack, not
             # a missing optional module -- surface it (fail the pack load), don't black-hole it.
             cache.pop(key, None)
             raise
-        except Exception:
+        except Exception as exc:
             # A bundled module that errors on load (e.g. luasocket's pure-Lua layer without its
             # native core) must not kill the plugin that required it: black-hole it if we can.
             # (Catch Exception, not a specific lupa.LuaError -- the class differs per Lua backend;
             # the loop guard raises BaseException, which still propagates below.)
             cache.pop(key, None)
+            if on_error is not None:
+                on_error(key, path, exc)
             if fallback is not None:
                 cache[key] = fallback
                 return fallback
@@ -203,6 +243,11 @@ def install_pack_require(
             # A module(..., package.seeall)-style lib (Lua 5.1) registers itself in
             # package.loaded under its name and returns nothing; hand back that table.
             result = _loaded_module(key)
+            # Some portable-MUSHclient packs split dotted modules across files that write
+            # globals and return nothing, then read them through the dotted namespace. Keep
+            # bare no-return modules nil, but provide that legacy namespace for qualified ones.
+            if result is None and "." in key:
+                result = _legacy_module(key)
         cache[key] = result
         return result
 

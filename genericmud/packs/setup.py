@@ -50,6 +50,41 @@ def _count(path: Path, needle: str) -> int:
         return 0
 
 
+def _mush_world_score(path: Path) -> int:
+    """How much runnable configuration a MUSHclient world file contains."""
+    try:
+        text = path.read_text(encoding="latin-1", errors="ignore").lower()
+    except OSError:
+        return 0
+    includes = text.count("<include")
+    rules = len(re.findall(r"<(?:trigger|alias)(?:\s|>)", text))
+    external_script = bool(re.search(r'script_filename\s*=\s*"[^"\s]+"', text))
+    return includes * 1000 + rules + (100 if external_script else 0)
+
+
+def _mush_plugin_score(path: Path, mud_name: str | None) -> int:
+    """Rank standalone MUSHclient plugins when a bundled world is inert."""
+    if path.suffix.lower() != ".xml" or "/state/" in f"/{path.as_posix().lower()}/":
+        return -1
+    try:
+        text = path.read_text(encoding="latin-1", errors="ignore").lower()
+    except OSError:
+        return -1
+    if "<plugin" not in text:
+        return -1
+    stem = _normalize_name(path.stem)
+    target = _normalize_name(mud_name or "")
+    score = len(re.findall(r"<trigger(?:\s|>)", text)) * 2
+    score += len(re.findall(r"<alias(?:\s|>)", text))
+    if "soundpack" in stem or "soundpack" in text[:4000]:
+        score += 500
+    if target and stem == target:
+        score += 1000
+    elif target and len(stem) >= 4 and stem[:4] == target[:4]:
+        score += 300
+    return score
+
+
 def detect_entry(pack_dir: str | Path, *, mud_name: str | None = None) -> str | None:
     """Best-guess load script for a multi-file pack, relative to ``pack_dir``.
 
@@ -75,21 +110,33 @@ def detect_entry(pack_dir: str | Path, *, mud_name: str | None = None) -> str | 
     def rel(script: Path) -> str:
         return script.relative_to(pack_dir).as_posix()
 
-    # A MUSHclient pack (no VIPMud .set entry) loads from a .MCL world, which <include>s
-    # the plugins. Prefer it over a stray main.* plugin. Among several .MCL (a full
-    # MUSHclient-install bundle also ships captures/sandbox worlds), pick the one that
-    # <include>s the most plugins -- the soundpack world. A VIPMud pack that merely
-    # bundles a .MCL for connection info has a .set, so it picks its .set entry below.
+    # A MUSHclient pack (no VIPMud .set entry) normally loads from a productive .MCL world.
+    # Do not select an empty saved world merely because it exists: several distributions
+    # carry an inert .MCL beside the actual MUD-named sound plugin.
     worlds = [s for s in scripts if s.suffix.lower() == ".mcl"]
     if worlds and not any(s.suffix.lower() == ".set" for s in scripts):
-        return rel(max(worlds, key=lambda w: _count(w, "<include")))
+        productive = [(world, _mush_world_score(world)) for world in worlds]
+        productive = [(world, score) for world, score in productive if score]
+        if productive:
+            return rel(max(productive, key=lambda pair: (pair[1], rel(pair[0])))[0])
+        label = mud_name or pack_dir.name
+        plugins = sorted(
+            ((_mush_plugin_score(script, label), rel(script), script) for script in scripts),
+            reverse=True,
+        )
+        if plugins and plugins[0][0] >= 300:
+            return rel(plugins[0][2])
+        if len(worlds) == 1:
+            return rel(worlds[0])
+    inert_worlds = {world for world in worlds if not _mush_world_score(world)}
+    candidates = [script for script in scripts if script not in inert_worlds]
     for preferred in _ENTRY_PREFERENCE:
-        for script in scripts:
+        for script in candidates:
             if script.name.lower() == preferred:
                 return rel(script)
     if mud_name:  # a VIPMud loader is named after the MUD ("star conquest.set" -> Star Conquest)
         target = _normalize_name(mud_name)
-        for script in scripts:
+        for script in candidates:
             if target and _normalize_name(script.stem) == target:
                 return rel(script)
     loaders = [(s, _count(s, "#load")) for s in scripts if s.suffix.lower() == ".set"]
@@ -98,12 +145,20 @@ def detect_entry(pack_dir: str | Path, *, mud_name: str | None = None) -> str | 
         loaders.sort(key=lambda pair: (rel(pair[0]).count("/"), -pair[1], rel(pair[0])))
         return rel(loaders[0][0])
     root = pack_dir.name.lower()  # a plugin named after the pack (toastush.xml in toastush/)
-    for script in scripts:
+    for script in candidates:
         stem = script.stem.lower()
         if len(stem) >= _MIN_NAMED_STEM and stem in root:
             return rel(script)
-    if len(scripts) == 1:
-        return rel(scripts[0])
+    if len(candidates) == 1:
+        return rel(candidates[0])
+    # Plugin-manager repositories can contain many unrelated plugins and no world file.
+    # Pick only a strong MUD/soundpack match; a weak highest score remains ambiguous.
+    ranked = sorted(
+        ((_mush_plugin_score(script, mud_name), rel(script), script) for script in candidates),
+        reverse=True,
+    )
+    if ranked and ranked[0][0] >= 300:
+        return rel(ranked[0][2])
     return None
 
 
@@ -209,6 +264,11 @@ def setup_pack_from_manifest(
             rejected=len(result.rejected), failed=len(result.failed),
             ok=result.ok, first_failed=(result.failed[0] if result.failed else ""),
         )
+    if not result.ok:
+        problems = [*result.failed, *(f"rejected unsafe path: {path}" for path in result.rejected)]
+        raise PackError(
+            f"{source.name} sync was incomplete ({len(problems)} file errors): {problems[0]}"
+        )
     _write_pack_toml(store.pack_dir(source.id), source)
     manifest = store.register(source.id, origin=source.manifest_url)
     world = replace(source.world)  # a copy; the caller persists/edits it, don't mutate the registry
@@ -230,7 +290,7 @@ def setup_pack_from_git(
     :func:`vault.download`'s ``(url, dest, *, max_bytes=...)`` shape. Re-running is the update path.
     """
     fetch = download or vault.download
-    urls = vault.git_archive_urls(source.repo_url)
+    urls = list(source.archive_urls) or vault.git_archive_urls(source.repo_url)
     if not urls:
         raise PackError(f"{source.name}: can't derive an archive URL from {source.repo_url!r}")
     with tempfile.TemporaryDirectory() as tmp:
@@ -239,7 +299,9 @@ def setup_pack_from_git(
         for url in urls:  # master, then main
             try:
                 fetch(url, archive, max_bytes=_GIT_ARCHIVE_MAX_BYTES)
-                break
+                if zipfile.is_zipfile(archive):
+                    break
+                errors.append(f"{url}: response was not a ZIP archive")
             except Exception as exc:  # noqa: BLE001 - wrong branch / not found -> try the next url
                 errors.append(f"{url}: {type(exc).__name__}: {exc}")
         else:
