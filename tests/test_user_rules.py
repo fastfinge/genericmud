@@ -1,8 +1,11 @@
-"""User rules (the no-code soundpack builder's engine layer) + decode fallback."""
+"""Field-based user automation plus server-text decoding regressions."""
 
 from __future__ import annotations
 
+import pytest
+
 from genericmud.app import EngineApp
+from genericmud.automation.channels import ChannelPolicy
 from genericmud.automation.engine import AutomationEngine
 from genericmud.config.keymap import load_keymap
 from genericmud.model.buffer import Line
@@ -32,14 +35,14 @@ def _register(rules: UserRules, tmp_path) -> tuple[RecordingSink, AutomationEngi
 
 
 def test_trigger_full_power(tmp_path):
-    # One dialog-built trigger drives sound + speech + send + gag-from-speech +
+    # One field-made trigger drives sound + speech + send + gag-from-speech +
     # channel routing, with %1 captures in the texts -- parity with a scripted rule.
     (tmp_path / "growl.ogg").write_bytes(b"OggS")
     rules = UserRules(
         channels=[UserChannel(name="combat", speak=False, display=True)],
         triggers=[UserTrigger(
             pattern="* growls at you", sound="growl.ogg", volume=60, pan=-50,
-            loop=False, speak="%1 attacks", send="consider %1", gag="speech",
+            loop=False, speak="%1 attacks", send="consider %1\nflee", gag="speech",
             channel="combat",
         )],
     )
@@ -49,7 +52,7 @@ def test_trigger_full_power(tmp_path):
     assert cue["file"].endswith("growl.ogg") and abs(cue["gain"] - 0.6) < 1e-9
     assert abs(cue["pan"] + 0.5) < 1e-9
     assert ("a goblin attacks", "combat", False) in sink.spoken
-    assert sink.sent == ["consider a goblin"]
+    assert sink.sent == ["consider a goblin", "flee"]
     assert line.gagged and line.display_when_gagged  # silent but still shown
     assert line.channel == "combat"
     assert engine.channels.policy("combat").speak is False  # user channel policy
@@ -63,12 +66,101 @@ def test_alias_with_wildcard_args(tmp_path):
     assert sink.sent == ["shoot goblin"]
 
 
+def test_alias_command_stack_uses_captures_script_vars_and_mud_vars(tmp_path):
+    rules = UserRules(aliases=[UserAlias(
+        pattern="combo *",
+        send=(
+            "stand\n"
+            "kill ${1}\n"
+            "consider %1\n"
+            "report ${script:stance} at ${mud:Char.Vitals.hp} health"
+        ),
+    )])
+    sink, engine = _register(rules, tmp_path)
+    engine.set_var("stance", "aggressive")
+    engine.set_mud_var("Char.Vitals", {"hp": 73})
+
+    assert engine.process_input("combo goblin") == []
+    assert sink.sent == [
+        "stand", "kill goblin", "consider goblin", "report aggressive at 73 health",
+    ]
+
+
+def test_field_alias_command_uses_named_regex_capture(tmp_path):
+    rules = UserRules(aliases=[UserAlias(
+        pattern=r"hit (?P<target>\w+)", regex=True, send="kill ${target}",
+    )])
+    sink, engine = _register(rules, tmp_path)
+
+    assert engine.process_input("hit troll") == []
+    assert sink.sent == ["kill troll"]
+
+
+def test_rule_command_stack_expands_before_sending_any_command(tmp_path):
+    rules = UserRules(aliases=[UserAlias(
+        pattern="unsafe", send="stand\nkill ${script:missing}", speak="commands sent",
+    )])
+    sink, engine = _register(rules, tmp_path)
+
+    assert engine.process_input("unsafe") == []
+    assert engine.process_input("unsafe") == []
+    assert sink.sent == []
+    assert sink.spoken == [
+        (
+            "Automation command not sent: unknown command variable: script:missing",
+            "system", False,
+        )
+    ]
+
+
+def test_field_rule_rejects_more_than_one_hundred_commands(tmp_path):
+    rules = UserRules(aliases=[UserAlias(
+        pattern="flood", send="\n".join(f"look {index}" for index in range(101)),
+    )])
+    with pytest.raises(ValueError, match="too many commands.*100"):
+        _register(rules, tmp_path)
+
+
+def test_legacy_capture_text_cannot_inject_a_variable_template(tmp_path):
+    rules = UserRules(aliases=[UserAlias(pattern="say *", send="tell %1")])
+    sink, engine = _register(rules, tmp_path)
+    engine.set_var("secret", "should-not-expand")
+
+    engine.process_input("say ${script:secret}")
+    assert sink.sent == ["tell ${script:secret}"]
+
+
 def test_key_macro(tmp_path):
-    rules = UserRules(keys=[UserKey(key="ctrl+h", send="hp", speak="health check")])
+    rules = UserRules(keys=[UserKey(key="ctrl+h", send="hp\nscore", speak="health check")])
     sink, engine = _register(rules, tmp_path)
     assert engine.press_key("ctrl+h")
-    assert sink.sent == ["hp"]
+    assert sink.sent == ["hp", "score"]
     assert sink.spoken[-1][0] == "health check"
+
+
+def test_disabled_automation_is_saved_but_not_registered(tmp_path):
+    rules = UserRules(
+        triggers=[UserTrigger(pattern="danger", speak="warning", enabled=False)],
+        aliases=[UserAlias(pattern="x", send="examine", enabled=False)],
+        keys=[UserKey(key="f2", send="score", enabled=False)],
+        channels=[UserChannel(name="quiet", speak=False, enabled=False)],
+    )
+    save_rules(tmp_path, rules)
+    loaded = load_rules(tmp_path)
+    sink, engine = _register(loaded, tmp_path)
+
+    engine.process_line(Line("danger"))
+    assert engine.process_input("x") == ["x"]
+    assert not engine.press_key("f2")
+    assert "quiet" not in engine.channels.names()
+    assert sink.spoken == [] and sink.sent == []
+
+
+def test_older_rules_default_to_enabled():
+    loaded = UserRules.from_json(
+        '{"version": 1, "aliases": [{"pattern": "x", "send": "examine"}]}'
+    )
+    assert loaded.aliases[0].enabled is True
 
 
 def test_roundtrip_and_reload_via_remove_source(tmp_path):
@@ -102,6 +194,33 @@ def test_remove_source_restores_shadowed_key():
     engine.remove_source("user")
     engine.press_key("f5")
     assert sink.sent == ["user", "pack"]
+
+
+def test_remove_source_restores_shadowed_channel_policy(tmp_path):
+    sink = RecordingSink()
+    engine = AutomationEngine(sink)
+    engine.channels.set_policy(
+        "combat", ChannelPolicy(speak=True, display=False), source="pack"
+    )
+    api = ScriptApi(engine, source=user_rules.SOURCE, base_dir=str(tmp_path))
+    register_rules(
+        api,
+        UserRules(channels=[UserChannel(name="combat", speak=False, display=True)]),
+    )
+    assert engine.channels.policy("combat") == ChannelPolicy(speak=False, display=True)
+
+    engine.remove_source(user_rules.SOURCE)
+    assert engine.channels.policy("combat") == ChannelPolicy(speak=True, display=False)
+
+
+def test_remove_source_removes_unshadowed_channel_policy(tmp_path):
+    sink, engine = _register(
+        UserRules(channels=[UserChannel(name="temporary", speak=False)]), tmp_path
+    )
+    assert "temporary" in engine.channels.names()
+
+    engine.remove_source(user_rules.SOURCE)
+    assert "temporary" not in engine.channels.names()
 
 
 def test_corrupt_rules_file_loads_empty(tmp_path):

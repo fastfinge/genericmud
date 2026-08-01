@@ -278,7 +278,9 @@ class ScriptApi:
         if name in _RESERVED_CHANNELS:
             return  # a pack can't mute/redirect the accessibility-critical channels
         self._engine.channels.set_policy(
-            name, ChannelPolicy(speak=speak, display=display, interrupt=interrupt, voice=voice)
+            name,
+            ChannelPolicy(speak=speak, display=display, interrupt=interrupt, voice=voice),
+            source=self._source,
         )
 
     def set_volume(self, category: str, gain: float) -> None:

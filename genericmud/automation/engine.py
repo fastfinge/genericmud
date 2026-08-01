@@ -228,7 +228,7 @@ class AutomationEngine:
         self._vars[name] = str(value)
 
     def remove_source(self, source: str) -> None:
-        """Drop every trigger/alias/key a source registered (live rule-editor reload).
+        """Drop every rule and channel policy registered by one reloading source.
 
         Keys are rebuilt from the surviving bindings in registration order, preserving
         the last-writer-wins the original registrations produced.
@@ -240,6 +240,7 @@ class AutomationEngine:
             # Replay the surviving bindings in order: last writer wins again, and a
             # combo the removed source had shadowed falls back to the earlier owner.
             self._keys = {key: callback for key, _source, callback in self._key_bindings}
+        self.channels.remove_source(source)
         self.cancel_source_timers(source)
 
     def delete_var(self, name: str) -> None:

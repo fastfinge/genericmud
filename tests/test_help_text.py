@@ -57,7 +57,9 @@ def test_plain_language_scripting_guide_is_linked_and_covers_the_public_surface(
     assert "docs/scripting.md" in readme
     assert len(guide) > 10_000
     for topic in (
-        "## Open the script editor",
+        "## Start in the Automation Manager",
+        "## Make an alias without writing code",
+        "## Open the Lua editor",
         "## Send one command or several commands",
         "## Combine captures, script values, and MUD data",
         "## When a script does not work",

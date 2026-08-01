@@ -8,7 +8,7 @@ It's free, and it loads many existing VIPMud `.set` and MUSHclient soundpacks
 as-is, so a pack you already use very likely just works.
 
 The [genericMud manual](docs/README.md) links to the longer guides, including a
-plain-language [scripting and advanced automation guide](docs/scripting.md).
+plain-language [automation and Lua scripting guide](docs/scripting.md).
 
 ## Getting it running
 
@@ -103,26 +103,30 @@ main output.
   that share your location with the client. **Alt+S** stops a walk in
   progress.
 - Typing `sh goblin` when you made an alias `sh *` → `shoot %1`? That's in
-  the visual rule builder, next section.
+  the Automation Manager, next section.
 
-## Triggers, aliases, and automation scripts
+## Automation: triggers, aliases, hotkeys, channels, and scripts
 
-**Ctrl+B** opens the visual rule builder — the no-scripting way to make the MUD
-react. A trigger watches for text and can play a sound (with volume and
-stereo position), speak something different, send a command back, hide the
-line, interrupt speech, or file the line under a chat channel. You choose how
-it matches: "the line contains this text" is the simple default; wildcards
-(`*` catches anything, so `* tells you *` captures who and what), whole-line,
-and regular expressions are there when you want them. Aliases shorten what
-you type (`sh *` sends `shoot %1`), and hotkeys bind a key to a command —
-press the key combination you want and it's captured. Everything saves
-immediately and works on the very next line from the MUD.
+**Ctrl+B** opens one Automation Manager for the current world. Choose
+**Triggers**, **Aliases**, **Hotkeys**, **Channels**, or **Scripts** from the
+**Show** box. There is no separate simple or advanced builder.
 
-Advanced automation lives under **Automation → Edit scripts for this world**.
-Create one or more sandboxed Lua files; they load alphabetically and can be
-saved and reloaded without reconnecting. Scripts can define triggers, aliases,
-hotkeys, timers, channels, saved variables, and single or multiple MUD commands.
-For example:
+A trigger reacts to text from the MUD. It can play a sound, speak something
+shorter, send commands, hide the matched line, interrupt speech, or route the
+line to a chat channel. An alias replaces a shortcut you type: `sh *` can send
+`shoot ${1}`. A hotkey runs commands when you press a chosen key. These editors
+use ordinary fields; no code is required.
+
+Each trigger, alias, or hotkey can send one command or a sequence. Put one
+command on each line. The whole sequence is filled in before its first command
+is sent. Command fields understand matched text (`${1}` or the older `%1`), a
+value saved by a script (`${script:target}`), and live data sent by the MUD,
+such as MSDP `${mud:HEALTH}` or GMCP `${mud:Char.Vitals.hp}`. If a value is not
+available, none of that sequence is sent and genericMud speaks the problem once.
+
+Choose **Scripts** in the same manager when the automation needs decisions,
+timers, reusable functions, or other Lua code. Scripts are sandboxed, load
+alphabetically, and can be saved and reloaded without reconnecting. For example:
 
 ```lua
 mud.alias("combo *", function(line, captures)
@@ -131,14 +135,14 @@ mud.alias("combo *", function(line, captures)
 end)
 ```
 
-Command templates can combine regex or wildcard captures (`${1}` or a named
-capture), script variables (`${script:target}`), and live MUD protocol data
-such as MSDP `${mud:HEALTH}` or GMCP `${mud:Char.Vitals.hp}`. An unscoped name
-checks captures, then script variables, then MUD variables. A missing value
-stops the whole command group before any part is sent. Read the
-[step-by-step scripting guide](docs/scripting.md) for copyable examples and the
-full API. A shorter reference is available inside the app under
-**Automation → Scripting help**.
+Use **Duplicate** to start from an existing item. **Disable** keeps a trigger,
+alias, hotkey, or channel saved without letting it run. Changes work on the
+next matching line; scripts have **Reload scripts** and **Open scripts folder**
+actions in their category.
+
+Read the [step-by-step automation and scripting guide](docs/scripting.md) for
+plain-language instructions, copyable examples, and the full Lua API. The same
+shorter guide is available offline under **Automation → Automation help**.
 
 ## Soundpacks
 
@@ -152,7 +156,7 @@ contain code).
 ## Sharing your setup
 
 **File → Export This World** saves the world you're on — connection details,
-all your builder triggers, aliases, hotkeys, channels, and every sound file
+all your triggers, aliases, hotkeys, channels, and every sound file
 they use, plus its automation scripts — as one zip. Send it to a friend; they
 pick **File → Import a World** and the whole thing lands in their Connect
 dialog, sounds and scripts included.
@@ -194,7 +198,11 @@ View, **Alt+H** Help.
 | Alt+B / Alt+R | Drop a breadcrumb / retrace to it |
 | Alt+W / Alt+S | Where am I / stop walking |
 | Ctrl+P | Manage soundpacks |
-| Ctrl+B | Visual rule builder |
+| Ctrl+B | Open the Automation Manager |
+| Ctrl+1..5 in Automation Manager | Show triggers / aliases / hotkeys / channels / scripts |
+| Ctrl+N in Automation Manager | Create an item in the category being shown |
+| Enter / Delete in an automation list | Edit / delete the selected item |
+| F2 in the Scripts list | Rename the selected script |
 | Ctrl+Shift+B | Browse soundpacks online |
 | Alt+Shift+L | Log this session to a file |
 | Alt+Shift+D | Speak the diagnostic log location and summary |

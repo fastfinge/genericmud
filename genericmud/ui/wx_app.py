@@ -26,6 +26,7 @@ import traceback
 import webbrowser
 import zipfile
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import wx
@@ -1614,7 +1615,7 @@ class _KeyCaptureCtrl(wx.TextCtrl):
 
 
 class _RuleEditorBase(wx.Dialog):
-    """Shared layout helpers for the builder dialogs (NVDA: label precedes control)."""
+    """Shared layout helpers for automation dialogs (NVDA: label precedes control)."""
 
     def _grid(self) -> wx.FlexGridSizer:
         grid = wx.FlexGridSizer(0, 2, 6, 6)
@@ -1631,6 +1632,30 @@ class _RuleEditorBase(wx.Dialog):
         ctrl = wx.TextCtrl(self, value=value)
         ctrl.SetName(self._field_name(label))  # NVDA needs the name as well as the label
         grid.Add(ctrl, 1, wx.EXPAND)
+        return ctrl
+
+    def _command_text(
+        self, grid: wx.FlexGridSizer, value: str, *, captures: bool
+    ) -> wx.TextCtrl:
+        label = "&Commands to send, one per line:"
+        grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_TOP)
+        ctrl = wx.TextCtrl(
+            self, value=value, size=(-1, 80),
+            style=wx.TE_MULTILINE | wx.TE_DONTWRAP,
+        )
+        ctrl.SetName(self._field_name(label))
+        grid.Add(ctrl, 1, wx.EXPAND)
+        detail = (
+            "Variables: ${1} is the first matched part; ${script:name} is a script "
+            "variable; ${mud:HEALTH} is data sent by the MUD."
+            if captures else
+            "Variables: ${script:name} is a script variable; ${mud:HEALTH} is data "
+            "sent by the MUD."
+        )
+        grid.Add(wx.StaticText(self, label=""))
+        help_text_ctrl = wx.StaticText(self, label=detail)
+        help_text_ctrl.Wrap(480)
+        grid.Add(help_text_ctrl, 1, wx.EXPAND)
         return ctrl
 
     def _slider(
@@ -1652,11 +1677,17 @@ class TriggerEditorDialog(_RuleEditorBase):
     """Create/edit one user trigger: everything a scripted trigger can do, as fields."""
 
     def __init__(self, parent: wx.Window, pack_dir: Path, trigger: UserTrigger) -> None:
-        super().__init__(parent, title="Trigger")
+        super().__init__(
+            parent, title="Trigger",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
         self._pack_dir = pack_dir
+        self._enabled = trigger.enabled
         outer = wx.BoxSizer(wx.VERTICAL)
         grid = self._grid()
-        self._pattern = self._text(grid, "&Match text:", trigger.pattern)
+        self._pattern = self._text(
+            grid, "When the MUD sends &text matching:", trigger.pattern
+        )
         # Order must mirror MATCH_CHOICES: ("contains", "wildcard", "exact", "regex").
         self._match = wx.RadioBox(
             self, label="Ho&w to match",
@@ -1664,7 +1695,7 @@ class TriggerEditorDialog(_RuleEditorBase):
                 "The line contains this text",
                 "Wildcard (* = anything, ? = one character)",
                 "The whole line, exactly",
-                "Regular expression (advanced)",
+                "Regular expression",
             ],
             majorDimension=1, style=wx.RA_SPECIFY_COLS,
         )
@@ -1683,7 +1714,7 @@ class TriggerEditorDialog(_RuleEditorBase):
         grid.Add(wx.StaticText(self, label=""))
         grid.Add(self._loop)
         self._speak = self._text(grid, "Spea&k this text (%1 = first wildcard):", trigger.speak)
-        self._send = self._text(grid, "S&end this command to the MUD:", trigger.send)
+        self._send = self._command_text(grid, trigger.send, captures=True)
         self._interrupt = wx.CheckBox(
             self, label="&Interrupt current speech the moment this fires"
         )
@@ -1735,22 +1766,27 @@ class TriggerEditorDialog(_RuleEditorBase):
             stop_channel=self._stop_channel.GetValue().strip(),
             match=match,
             interrupt=self._interrupt.GetValue(),
+            enabled=self._enabled,
         )
 
 
 class AliasEditorDialog(_RuleEditorBase):
     def __init__(self, parent: wx.Window, alias: UserAlias) -> None:
-        super().__init__(parent, title="Alias")
+        super().__init__(
+            parent, title="Alias",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._enabled = alias.enabled
         outer = wx.BoxSizer(wx.VERTICAL)
         grid = self._grid()
         self._pattern = self._text(
             grid, "&When I type (* = anything, e.g. sh *):", alias.pattern
         )
-        self._regex = wx.CheckBox(self, label="Pattern is a &regular expression (advanced)")
+        self._regex = wx.CheckBox(self, label="Pattern is a &regular expression")
         self._regex.SetValue(alias.regex)
         grid.Add(wx.StaticText(self, label=""))
         grid.Add(self._regex)
-        self._send = self._text(grid, "&Send instead (%1 = first wildcard):", alias.send)
+        self._send = self._command_text(grid, alias.send, captures=True)
         self._speak = self._text(grid, "Spea&k this confirmation (optional):", alias.speak)
         self._finish(outer, grid)
 
@@ -1760,13 +1796,18 @@ class AliasEditorDialog(_RuleEditorBase):
             regex=self._regex.GetValue(),
             send=self._send.GetValue().strip(),
             speak=self._speak.GetValue().strip(),
+            enabled=self._enabled,
         )
 
 
 class KeyEditorDialog(_RuleEditorBase):
     def __init__(self, parent: wx.Window, pack_dir: Path, key: UserKey) -> None:
-        super().__init__(parent, title="Hotkey")
+        super().__init__(
+            parent, title="Hotkey",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
         self._pack_dir = pack_dir
+        self._enabled = key.enabled
         outer = wx.BoxSizer(wx.VERTICAL)
         grid = self._grid()
         grid.Add(wx.StaticText(self, label="&Press the key combination:"), 0,
@@ -1774,7 +1815,7 @@ class KeyEditorDialog(_RuleEditorBase):
         self._key = _KeyCaptureCtrl(self)
         self._key.SetValue(key.key)
         grid.Add(self._key, 1, wx.EXPAND)
-        self._send = self._text(grid, "&Send this command:", key.send)
+        self._send = self._command_text(grid, key.send, captures=False)
         self._speak = self._text(grid, "Spea&k this text:", key.speak)
         self._sound = self._text(grid, "Play this s&ound (optional):", key.sound)
         browse = wx.Button(self, label="&Browse for sound...")
@@ -1799,12 +1840,14 @@ class KeyEditorDialog(_RuleEditorBase):
             send=self._send.GetValue().strip(),
             speak=self._speak.GetValue().strip(),
             sound=self._sound.GetValue().strip(),
+            enabled=self._enabled,
         )
 
 
 class ChannelEditorDialog(_RuleEditorBase):
     def __init__(self, parent: wx.Window, channel: UserChannel) -> None:
         super().__init__(parent, title="Channel")
+        self._enabled = channel.enabled
         outer = wx.BoxSizer(wx.VERTICAL)
         grid = self._grid()
         self._name = self._text(grid, "Channel &name:", channel.name)
@@ -1825,121 +1868,304 @@ class ChannelEditorDialog(_RuleEditorBase):
             speak=self._speak.GetValue(),
             display=self._display.GetValue(),
             interrupt=self._interrupt.GetValue(),
+            enabled=self._enabled,
         )
 
 
 def _rule_summary(kind: str, rule) -> str:
     """One spoken line per rule for the manager list."""
     # Plain words, no arrow/dash glyphs: these lines are read by a screen reader.
+    status = "Disabled. " if not rule.enabled else ""
+    commands = "; ".join(
+        line.strip() for line in rule.send.splitlines() if line.strip()
+    ) if hasattr(rule, "send") else ""
+    if len(commands) > 180:
+        commands = f"{commands[:177]}..."
     if kind == "trigger":
         actions = [part for part in (
             f"sound {Path(rule.sound).name}" if rule.sound else "",
             f"speak {rule.speak}" if rule.speak else "",
-            f"send {rule.send}" if rule.send else "",
+            f"send {commands}" if commands else "",
             "interrupts speech" if rule.interrupt else "",
             {"speech": "silence line", "line": "remove line"}.get(rule.gag, ""),
             f"channel {rule.channel}" if rule.channel else "",
         ) if part]
         how = rule.match_kind()
         label = f"{rule.pattern}" if how == "wildcard" else f"{rule.pattern} ({how})"
-        return f"Trigger: {label}: {'; '.join(actions) or 'no action'}"
+        return f"{status}Trigger: {label}: {'; '.join(actions) or 'no action'}"
     if kind == "alias":
-        return f"Alias: {rule.pattern} sends {rule.send}"
+        return f"{status}Alias: {rule.pattern} sends {commands or 'nothing'}"
     if kind == "key":
-        action = rule.send or rule.speak or rule.sound
-        return f"Hotkey: {rule.key} runs {action}"
+        action = commands or rule.speak or rule.sound or "nothing"
+        return f"{status}Hotkey: {rule.key} runs {action}"
     return (
-        f"Channel: {rule.name}"
+        f"{status}Channel: {rule.name}"
         f" ({'speaks' if rule.speak else 'silent'},"
         f" {'shown' if rule.display else 'hidden'}"
         f"{', interrupts' if rule.interrupt else ''})"
     )
 
 
-class RulesBuilderDialog(wx.Dialog):
-    """The soundpack builder: list + create/edit/delete of the world's user rules.
+class AutomationManagerDialog(wx.Dialog):
+    """Manage every kind of per-world automation in one accessible dialog."""
 
-    Every change saves rules.json immediately and live-reloads the session's engine,
-    so a new trigger works on the very next MUD line -- no reconnect. Build-blind
-    (no wx on the dev host); the rules engine itself is tested headless.
-    """
+    _CATEGORIES = (
+        (
+            "trigger", "Triggers — when the MUD sends text",
+            "A trigger reacts to a matching line. It can send commands, speak text, "
+            "play sound, hide the line, or route it to a channel.",
+        ),
+        (
+            "alias", "Aliases — when I type a shortcut",
+            "An alias replaces a short command you type with one or more MUD commands.",
+        ),
+        (
+            "key", "Hotkeys — when I press a key",
+            "A hotkey sends commands, speaks text, or plays a sound when you press a "
+            "chosen key combination.",
+        ),
+        (
+            "channel", "Channels — how matching lines are handled",
+            "A channel controls whether routed lines are spoken, shown, or allowed to "
+            "interrupt current speech.",
+        ),
+        (
+            "script", "Scripts — reusable Lua automation",
+            "A script handles automation that needs decisions, timers, saved variables, "
+            "or shared functions. Scripts load alphabetically.",
+        ),
+    )
+    _CATEGORY_WORDS = {
+        "trigger": "Triggers", "alias": "Aliases", "key": "Hotkeys",
+        "channel": "Channels", "script": "Scripts",
+    }
+    _KIND_WORD = {
+        "trigger": "Trigger", "alias": "Alias", "key": "Hotkey", "channel": "Channel",
+    }
+    _RULE_TYPES = {
+        "trigger": UserTrigger, "alias": UserAlias,
+        "key": UserKey, "channel": UserChannel,
+    }
+    _RULE_COLLECTIONS = {
+        "trigger": "triggers", "alias": "aliases", "key": "keys", "channel": "channels",
+    }
+    _REQUIRED_FIELD = {
+        "trigger": ("pattern", "text to match"),
+        "alias": ("pattern", "the shortcut you will type"),
+        "key": ("key", "a key combination"),
+        "channel": ("name", "a name"),
+    }
+    _last_category = 0
 
     def __init__(self, parent: wx.Window, panel: SessionPanel, announce=None) -> None:
-        super().__init__(parent, title=f"Visual rule builder — {panel.world.name}",
-                         size=(640, 480))
+        super().__init__(
+            parent, title=f"Automation Manager — {panel.world.name}", size=(760, 590),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
         self._panel = panel
-        self._announce = announce or (lambda _text: None)  # speak the result of an action
+        self._announce = announce or (lambda _text: None)
         self._pack_dir = panel.app.user_rules_dir() if panel.app is not None else None
         self._rules = load_rules(self._pack_dir) if self._pack_dir else UserRules()
+        self._selections: dict[str, int] = {}
+
         outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(wx.StaticText(self, label="&Rules:"), 0, wx.LEFT | wx.TOP, 10)
-        self._list = wx.ListBox(self)
-        self._list.SetName("Rules")  # NVDA needs the name as well as the preceding label
+        introduction = wx.StaticText(
+            self,
+            label=(
+                "Choose what you want to automate. Basic commands and Lua scripts live "
+                "here together and are saved only for this world."
+            ),
+        )
+        introduction.Wrap(700)
+        outer.Add(introduction, 0, wx.ALL | wx.EXPAND, 10)
+
+        category_row = wx.BoxSizer(wx.HORIZONTAL)
+        category_row.Add(
+            wx.StaticText(self, label="&Show:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6
+        )
+        self._category = wx.Choice(
+            self, choices=[label for _kind, label, _description in self._CATEGORIES]
+        )
+        self._category.SetName("Automation type")
+        self._category.SetSelection(min(self._last_category, len(self._CATEGORIES) - 1))
+        self._category.Bind(wx.EVT_CHOICE, self._on_category)
+        category_row.Add(self._category, 1, wx.EXPAND)
+        outer.Add(category_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
+
+        self._description = wx.StaticText(self, label="")
+        self._description.Wrap(700)
+        outer.Add(self._description, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
+        self._items_label = wx.StaticText(self, label="&Items:")
+        outer.Add(self._items_label, 0, wx.LEFT | wx.RIGHT, 10)
+        self._list = wx.ListBox(self, style=wx.LB_SINGLE)
+        self._list.Bind(wx.EVT_LISTBOX, self._on_list_selection)
+        self._list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_edit)
+        self._list.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
         outer.Add(self._list, 1, wx.ALL | wx.EXPAND, 10)
-        buttons = wx.BoxSizer(wx.HORIZONTAL)
-        for label, handler in (
-            ("New &trigger...", self._on_new_trigger),
-            ("New &alias...", self._on_new_alias),
-            ("New &hotkey...", self._on_new_key),
-            ("New &channel...", self._on_new_channel),
-            ("&Edit...", self._on_edit),
-            ("&Delete", self._on_delete),
+
+        button_grid = wx.GridSizer(0, 4, 6, 6)
+        self._buttons: dict[str, wx.Button] = {}
+        for key, label, handler in (
+            ("new", "&New...", self._on_new),
+            ("edit", "&Edit...", self._on_edit),
+            ("duplicate", "D&uplicate...", self._on_duplicate),
+            ("toggle", "Disa&ble", self._on_toggle),
+            ("rename", "Rena&me...", self._on_rename),
+            ("delete", "&Delete", self._on_delete),
+            ("reload", "&Reload scripts", self._on_reload_scripts),
+            ("folder", "Open scripts &folder", self._on_open_scripts_folder),
         ):
             button = wx.Button(self, label=label)
             button.Bind(wx.EVT_BUTTON, handler)
-            buttons.Add(button, 0, wx.RIGHT, 6)
-        outer.Add(buttons, 0, wx.ALL, 10)
+            button_grid.Add(button, 0, wx.EXPAND)
+            self._buttons[key] = button
+        outer.Add(button_grid, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
+
+        bottom = wx.BoxSizer(wx.HORIZONTAL)
+        help_button = wx.Button(self, label="Automation &help...")
+        help_button.Bind(wx.EVT_BUTTON, self._on_help)
+        bottom.Add(help_button)
+        bottom.AddStretchSpacer()
         close = wx.Button(self, wx.ID_CANCEL, "Cl&ose")
-        outer.Add(close, 0, wx.ALL | wx.ALIGN_RIGHT, 10)
+        bottom.Add(close)
+        outer.Add(bottom, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
         self.SetSizer(outer)
+        self.SetMinSize((660, 500))
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_manager_key)
+
+        self._active_kind = self._kind()
         self._refresh()
 
-    # The list is a flat view over four collections; _entries maps row -> (kind, index).
-    def _refresh(self) -> None:
-        self._entries: list[tuple[str, int]] = []
-        labels: list[str] = []
-        for kind, items in (
-            ("trigger", self._rules.triggers), ("alias", self._rules.aliases),
-            ("key", self._rules.keys), ("channel", self._rules.channels),
-        ):
-            for index, rule in enumerate(items):
-                self._entries.append((kind, index))
-                labels.append(_rule_summary(kind, rule))
-        selection = self._list.GetSelection()
-        self._list.Set(labels)
-        if labels:
-            self._list.SetSelection(min(max(selection, 0), len(labels) - 1))
+    def _kind(self) -> str:
+        return self._CATEGORIES[self._category.GetSelection()][0]
 
-    def _save_and_reload(self) -> None:
-        if self._pack_dir is None:
+    def _collection(self, kind: str) -> list:
+        return {
+            "trigger": self._rules.triggers, "alias": self._rules.aliases,
+            "key": self._rules.keys, "channel": self._rules.channels,
+        }[kind]
+
+    def _refresh(self, select: int | str | None = None, *, focus: bool = False) -> None:
+        kind = self._kind()
+        _kind, _label, description = self._CATEGORIES[self._category.GetSelection()]
+        self._description.SetLabel(description)
+        self._description.Wrap(max(self.GetClientSize().GetWidth() - 40, 300))
+
+        if kind == "script":
+            labels = user_scripts.list_scripts(self._pack_dir) if self._pack_dir else []
+        else:
+            labels = [_rule_summary(kind, rule) for rule in self._collection(kind)]
+        previous = self._selections.get(kind, 0)
+        if isinstance(select, int):
+            previous = select
+        elif isinstance(select, str) and select in labels:
+            previous = labels.index(select)
+        self._list.Set(labels)
+        words = self._CATEGORY_WORDS[kind]
+        self._items_label.SetLabel(f"&{words}:")
+        self._list.SetName(f"{words} for this world, {len(labels)} items")
+        if labels:
+            selection = min(max(previous, 0), len(labels) - 1)
+            self._list.SetSelection(selection)
+            self._selections[kind] = selection
+        else:
+            self._selections[kind] = 0
+        self._update_buttons()
+        self.Layout()
+        if focus:
+            self._list.SetFocus()
+
+    def _selected_index(self) -> int | None:
+        index = self._list.GetSelection()
+        return index if index != wx.NOT_FOUND else None
+
+    def _selected_script(self) -> str | None:
+        index = self._selected_index()
+        return self._list.GetString(index) if index is not None else None
+
+    def _on_list_selection(self, _event: wx.CommandEvent) -> None:
+        if (index := self._selected_index()) is not None:
+            self._selections[self._kind()] = index
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        kind = self._kind()
+        index = self._selected_index()
+        has_item = index is not None
+        is_script = kind == "script"
+        singular = "script" if is_script else self._KIND_WORD[kind].lower()
+        self._buttons["new"].SetLabel(f"&New {singular}...")
+        self._buttons["edit"].Enable(has_item)
+        self._buttons["duplicate"].Enable(has_item)
+        self._buttons["delete"].Enable(has_item)
+        self._buttons["toggle"].Enable(has_item and not is_script)
+        self._buttons["rename"].Enable(has_item and is_script)
+        self._buttons["reload"].Enable(is_script)
+        self._buttons["folder"].Enable(is_script)
+        if has_item and not is_script:
+            enabled = self._collection(kind)[index].enabled
+            self._buttons["toggle"].SetLabel("Disa&ble" if enabled else "E&nable")
+        else:
+            self._buttons["toggle"].SetLabel("Disa&ble")
+
+    def _on_category(self, _event: wx.CommandEvent) -> None:
+        if (index := self._selected_index()) is not None:
+            self._selections[self._active_kind] = index
+        self._last_category = self._category.GetSelection()
+        type(self)._last_category = self._last_category
+        self._active_kind = self._kind()
+        self._refresh(focus=True)
+
+    def _on_manager_key(self, event: wx.KeyEvent) -> None:
+        code = event.GetKeyCode()
+        if event.ControlDown() and not event.AltDown() and not event.ShiftDown():
+            if ord("1") <= code <= ord("5"):
+                self._category.SetSelection(code - ord("1"))
+                self._on_category(event)
+                return
+            if code == ord("N"):
+                self._on_new(event)
+                return
+        event.Skip()
+
+    def _on_list_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            self._on_edit(event)
             return
+        if event.GetKeyCode() == wx.WXK_DELETE:
+            self._on_delete(event)
+            return
+        if event.GetKeyCode() == wx.WXK_F2 and self._kind() == "script":
+            self._on_rename(event)
+            return
+        event.Skip()
+
+    def _save_and_reload_rules(self, select: int | None = None) -> bool:
+        if self._pack_dir is None:
+            return False
         try:
             register_rules(
                 ScriptApi(
-                    AutomationEngine(),
-                    source="user-rule-validation",
+                    AutomationEngine(), source="user-rule-validation",
                     base_dir=str(self._pack_dir),
                 ),
                 self._rules,
             )
             save_rules(self._pack_dir, self._rules)
-        except Exception as error:  # noqa: BLE001 - validation/storage errors stay in the editor
+        except Exception as error:  # noqa: BLE001 - validation/storage errors stay in editor
             wx.MessageBox(
-                f"Rule not saved: {error}",
-                "Visual Rule Builder",
-                wx.OK | wx.ICON_ERROR,
-                self,
+                f"Automation not saved: {error}", "Automation Manager",
+                wx.OK | wx.ICON_ERROR, self,
             )
             self._rules = load_rules(self._pack_dir)
             self._refresh()
             return False
-        panel = self._panel
-        if panel.app is not None:
-            panel._loop.call_soon_threadsafe(panel.app.reload_user_rules)
-        self._refresh()
+        if self._panel.app is not None:
+            self._panel._loop.call_soon_threadsafe(self._panel.app.reload_user_rules)
+        self._refresh(select)
         return True
 
-    def _edit(self, kind: str, rule):
+    def _edit_rule(self, kind: str, rule):
         if kind == "trigger":
             dialog = TriggerEditorDialog(self, self._pack_dir, rule)
         elif kind == "alias":
@@ -1948,102 +2174,295 @@ class RulesBuilderDialog(wx.Dialog):
             dialog = KeyEditorDialog(self, self._pack_dir, rule)
         else:
             dialog = ChannelEditorDialog(self, rule)
-        result = dialog.result() if dialog.ShowModal() == wx.ID_OK else None
-        dialog.Destroy()
-        return result
+        try:
+            while True:
+                if dialog.ShowModal() != wx.ID_OK:
+                    return None
+                result = dialog.result()
+                if self._complete(kind, result) and self._valid_rule(kind, result):
+                    return result
+        finally:
+            dialog.Destroy()
 
-    # The field each rule kind can't be saved without, and how to name it to the user.
-    _REQUIRED_FIELD = {
-        "trigger": ("pattern", "match text"),
-        "alias": ("pattern", "trigger text"),
-        "key": ("key", "a key"),
-        "channel": ("name", "a name"),
-    }
+    def _valid_rule(self, kind: str, rule: object) -> bool:
+        if self._pack_dir is None:
+            return False
+        candidate = UserRules()
+        getattr(candidate, self._RULE_COLLECTIONS[kind]).append(
+            replace(rule, enabled=True)
+        )
+        try:
+            register_rules(
+                ScriptApi(
+                    AutomationEngine(), source="user-rule-validation",
+                    base_dir=str(self._pack_dir),
+                ),
+                candidate,
+            )
+        except Exception as error:  # noqa: BLE001 - keep the user's editor open on any error
+            word = self._KIND_WORD[kind].lower()
+            wx.MessageBox(
+                f"This {word} needs a change before it can be saved: {error}",
+                "Check automation", wx.OK | wx.ICON_ERROR, self,
+            )
+            return False
+        return True
 
     def _complete(self, kind: str, rule: object) -> bool:
-        """True if the rule has its required field; else tell the user, don't drop it silently.
-
-        A blank required field used to make New silently discard the whole rule and Edit
-        silently save a dead one -- invisible data loss in the flagship no-code feature.
-        """
         attr, label = self._REQUIRED_FIELD[kind]
         if getattr(rule, attr):
             return True
+        word = self._KIND_WORD[kind].lower()
         wx.MessageBox(
-            f"Not saved: this {kind} needs {label}.", "Incomplete rule",
+            f"Not saved: this {word} needs {label}.", "Incomplete automation",
             wx.OK | wx.ICON_INFORMATION, self,
         )
         return False
 
-    # kind -> the word spoken to the user (the list already uses these; "key" is a hotkey).
-    _KIND_WORD = {"trigger": "Trigger", "alias": "Alias", "key": "Hotkey", "channel": "Channel"}
-
-    def _add(self, kind: str, collection: list, result) -> None:
-        """Append a new rule, save, and say what happened (silence read as 'did it save?')."""
-        if result is None or not self._complete(kind, result):
+    def _on_new(self, _event: wx.CommandEvent) -> None:
+        kind = self._kind()
+        if kind == "script":
+            self._new_script()
             return
-        collection.append(result)
-        if self._save_and_reload():
+        result = self._edit_rule(kind, self._RULE_TYPES[kind]())
+        if result is None:
+            return
+        items = self._collection(kind)
+        items.append(result)
+        if self._save_and_reload_rules(len(items) - 1):
             self._announce(f"{self._KIND_WORD[kind]} added.")
 
-    def _on_new_trigger(self, _event: wx.CommandEvent) -> None:
-        self._add("trigger", self._rules.triggers, self._edit("trigger", UserTrigger()))
-
-    def _on_new_alias(self, _event: wx.CommandEvent) -> None:
-        self._add("alias", self._rules.aliases, self._edit("alias", UserAlias()))
-
-    def _on_new_key(self, _event: wx.CommandEvent) -> None:
-        self._add("key", self._rules.keys, self._edit("key", UserKey()))
-
-    def _on_new_channel(self, _event: wx.CommandEvent) -> None:
-        self._add("channel", self._rules.channels, self._edit("channel", UserChannel()))
-
-    def _selected(self) -> tuple[str, int] | None:
-        row = self._list.GetSelection()
-        if row == wx.NOT_FOUND or row >= len(self._entries):
-            return None
-        return self._entries[row]
-
-    def _collection(self, kind: str) -> list:
-        return {
-            "trigger": self._rules.triggers, "alias": self._rules.aliases,
-            "key": self._rules.keys, "channel": self._rules.channels,
-        }[kind]
-
     def _on_edit(self, _event: wx.CommandEvent) -> None:
-        selected = self._selected()
-        if selected is None:
+        if self._kind() == "script":
+            self._edit_selected_script()
             return
-        kind, index = selected
+        if (index := self._selected_index()) is None:
+            return
+        kind = self._kind()
         items = self._collection(kind)
-        result = self._edit(kind, items[index])
-        if result is not None and self._complete(kind, result):
+        result = self._edit_rule(kind, items[index])
+        if result is not None:
             items[index] = result
-            if self._save_and_reload():
+            if self._save_and_reload_rules(index):
                 self._announce(f"{self._KIND_WORD[kind]} updated.")
 
-    def _on_delete(self, _event: wx.CommandEvent) -> None:
-        selected = self._selected()
-        if selected is None:
+    def _on_duplicate(self, _event: wx.CommandEvent) -> None:
+        if (index := self._selected_index()) is None:
             return
-        kind, index = selected
+        kind = self._kind()
+        if kind == "script":
+            name = self._selected_script()
+            if name is None or self._pack_dir is None:
+                return
+            try:
+                source = user_scripts.read_script(self._pack_dir, name)
+            except OSError as error:
+                wx.MessageBox(str(error), "Couldn't open script", wx.OK | wx.ICON_ERROR, self)
+                return
+            self._new_script(source, default_name=f"{Path(name).stem}-copy.lua")
+            return
+        items = self._collection(kind)
+        result = self._edit_rule(kind, replace(items[index]))
+        if result is None:
+            return
+        items.append(result)
+        if self._save_and_reload_rules(len(items) - 1):
+            self._announce(f"{self._KIND_WORD[kind]} duplicated.")
+
+    def _on_toggle(self, _event: wx.CommandEvent) -> None:
+        kind = self._kind()
+        if kind == "script" or (index := self._selected_index()) is None:
+            return
+        items = self._collection(kind)
+        items[index] = replace(items[index], enabled=not items[index].enabled)
+        if self._save_and_reload_rules(index):
+            state = "enabled" if items[index].enabled else "disabled"
+            self._announce(f"{self._KIND_WORD[kind]} {state}.")
+
+    def _on_delete(self, _event: wx.CommandEvent) -> None:
+        if self._kind() == "script":
+            self._delete_script()
+            return
+        if (index := self._selected_index()) is None:
+            return
+        kind = self._kind()
         word = self._KIND_WORD[kind]
-        # Confirm first: the list selection can drift, and there's no undo. (Manage
-        # Soundpacks confirms uninstall the same way.)
         if wx.MessageBox(
-            f"Delete this {word.lower()}?", "Delete", wx.YES_NO | wx.ICON_QUESTION, self
+            f"Delete this {word.lower()}?", "Delete automation",
+            wx.YES_NO | wx.ICON_QUESTION, self,
         ) != wx.YES:
             return
         del self._collection(kind)[index]
-        if self._save_and_reload():
+        if self._save_and_reload_rules(index):
             self._announce(f"{word} deleted.")
+
+    def _request_script_reload(self) -> None:
+        if self._panel.app is not None:
+            self._panel._loop.call_soon_threadsafe(
+                self._panel.app.reload_user_scripts, True
+            )
+
+    def _save_script(self, name: str, source: str) -> bool:
+        if self._pack_dir is None:
+            return False
+        try:
+            user_scripts.validate_script(self._pack_dir, source)
+            user_scripts.save_script(self._pack_dir, name, source)
+        except Exception as error:  # noqa: BLE001 - syntax/storage errors stay in editor
+            wx.MessageBox(
+                f"Script not saved: {type(error).__name__}: {error}",
+                "Automation script", wx.OK | wx.ICON_ERROR, self,
+            )
+            return False
+        self._announce(f"{name} saved. Reloading automation scripts.")
+        self._request_script_reload()
+        self._refresh(name)
+        return True
+
+    def _edit_script(self, name: str, source: str) -> bool:
+        current = source
+        while True:
+            dialog = AutomationScriptEditorDialog(self, name, current)
+            try:
+                if dialog.ShowModal() != wx.ID_OK:
+                    return False
+                current = dialog.source()
+            finally:
+                dialog.Destroy()
+            if self._save_script(name, current):
+                return True
+
+    def _new_script(
+        self, source: str | None = None, *, default_name: str | None = None
+    ) -> None:
+        if self._pack_dir is None:
+            return
+        proposed = default_name or user_scripts.DEFAULT_SCRIPT_NAME
+        while True:
+            dialog = wx.TextEntryDialog(
+                self, "Name the new Lua script. Scripts load alphabetically.",
+                "New automation script", value=proposed,
+            )
+            try:
+                if dialog.ShowModal() != wx.ID_OK:
+                    return
+                proposed = dialog.GetValue()
+            finally:
+                dialog.Destroy()
+            try:
+                name = user_scripts.normalize_script_name(proposed)
+            except ValueError as error:
+                wx.MessageBox(str(error), "Invalid script name", wx.OK | wx.ICON_ERROR, self)
+                continue
+            existing = {item.casefold() for item in user_scripts.list_scripts(self._pack_dir)}
+            if name.casefold() in existing:
+                wx.MessageBox(
+                    f"A script named {name} already exists.", "Automation script",
+                    wx.OK | wx.ICON_INFORMATION, self,
+                )
+                proposed = name
+                continue
+            break
+        self._edit_script(name, user_scripts.DEFAULT_SCRIPT if source is None else source)
+
+    def _edit_selected_script(self) -> None:
+        if self._pack_dir is None or (name := self._selected_script()) is None:
+            return
+        try:
+            source = user_scripts.read_script(self._pack_dir, name)
+        except OSError as error:
+            wx.MessageBox(str(error), "Couldn't open script", wx.OK | wx.ICON_ERROR, self)
+            return
+        self._edit_script(name, source)
+
+    def _on_rename(self, _event: wx.CommandEvent) -> None:
+        if self._kind() != "script" or self._pack_dir is None:
+            return
+        name = self._selected_script()
+        if name is None:
+            return
+        proposed = name
+        while True:
+            dialog = wx.TextEntryDialog(
+                self, "New script filename:", "Rename automation script", value=proposed,
+            )
+            try:
+                if dialog.ShowModal() != wx.ID_OK:
+                    return
+                proposed = dialog.GetValue()
+            finally:
+                dialog.Destroy()
+            try:
+                renamed = user_scripts.rename_script(self._pack_dir, name, proposed)
+            except ValueError as error:
+                wx.MessageBox(str(error), "Couldn't rename script", wx.OK | wx.ICON_ERROR, self)
+                continue
+            except OSError as error:
+                wx.MessageBox(str(error), "Couldn't rename script", wx.OK | wx.ICON_ERROR, self)
+                return
+            break
+        if renamed == name:
+            return
+        self._announce(f"{name} renamed to {renamed}. Reloading automation scripts.")
+        self._request_script_reload()
+        self._refresh(renamed)
+
+    def _delete_script(self) -> None:
+        if self._pack_dir is None or (name := self._selected_script()) is None:
+            return
+        if wx.MessageBox(
+            f"Delete {name}?", "Delete automation script",
+            wx.YES_NO | wx.ICON_QUESTION, self,
+        ) != wx.YES:
+            return
+        try:
+            user_scripts.delete_script(self._pack_dir, name)
+        except OSError as error:
+            wx.MessageBox(str(error), "Couldn't delete script", wx.OK | wx.ICON_ERROR, self)
+            return
+        self._announce(f"{name} deleted. Reloading automation scripts.")
+        self._request_script_reload()
+        self._refresh()
+
+    def _on_reload_scripts(self, _event: wx.CommandEvent) -> None:
+        if self._kind() != "script":
+            return
+        selected = self._selected_script()
+        self._refresh(selected)
+        self._request_script_reload()
+
+    def _on_open_scripts_folder(self, _event: wx.CommandEvent) -> None:
+        if self._kind() != "script" or self._pack_dir is None:
+            return
+        folder = user_scripts.scripts_dir(self._pack_dir)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            opened = wx.LaunchDefaultApplication(str(folder))
+        except OSError as error:
+            opened = False
+            detail = f": {error}"
+        else:
+            detail = ""
+        if not opened:
+            wx.MessageBox(
+                f"Couldn't open {folder}{detail}", "Automation scripts",
+                wx.OK | wx.ICON_ERROR, self,
+            )
+
+    def _on_help(self, _event: wx.CommandEvent) -> None:
+        dialog = HelpDialog(self, "Automation help", help_text.SCRIPTING)
+        dialog.ShowModal()
+        dialog.Destroy()
 
 
 class AutomationScriptEditorDialog(wx.Dialog):
     """One accessible multiline Lua editor; its manager owns validation and storage."""
 
     def __init__(self, parent: wx.Window, name: str, source: str) -> None:
-        super().__init__(parent, title=f"Edit automation script — {name}", size=(720, 560))
+        super().__init__(
+            parent, title=f"Edit automation script — {name}", size=(720, 560),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(
             wx.StaticText(
@@ -2066,198 +2485,11 @@ class AutomationScriptEditorDialog(wx.Dialog):
         buttons.Realize()
         outer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 10)
         self.SetSizer(outer)
+        self.SetMinSize((600, 420))
         self._source.SetFocus()
 
     def source(self) -> str:
         return self._source.GetValue()
-
-
-class AutomationScriptsDialog(wx.Dialog):
-    """Create/edit ordered per-world native Lua files and request live engine reloads."""
-
-    def __init__(self, parent: wx.Window, panel: SessionPanel, announce=None) -> None:
-        super().__init__(
-            parent, title=f"Automation scripts — {panel.world.name}", size=(620, 440)
-        )
-        self._panel = panel
-        self._announce = announce or (lambda _text: None)
-        self._pack_dir = panel.app.user_rules_dir() if panel.app is not None else None
-
-        outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(
-            wx.StaticText(
-                self,
-                label="&Scripts (loaded alphabetically when this world opens):",
-            ),
-            0, wx.LEFT | wx.TOP, 10,
-        )
-        self._list = wx.ListBox(self, style=wx.LB_SINGLE)
-        self._list.SetName("Automation scripts")
-        self._list.Bind(wx.EVT_LISTBOX_DCLICK, self._on_edit)
-        outer.Add(self._list, 1, wx.ALL | wx.EXPAND, 10)
-
-        buttons = wx.GridSizer(0, 3, 6, 6)
-        for label, handler in (
-            ("&New...", self._on_new),
-            ("&Edit...", self._on_edit),
-            ("Re&name...", self._on_rename),
-            ("&Delete", self._on_delete),
-            ("&Reload all", self._on_reload),
-            ("Open scripts &folder", self._on_open_folder),
-        ):
-            button = wx.Button(self, label=label)
-            button.Bind(wx.EVT_BUTTON, handler)
-            buttons.Add(button, 0, wx.EXPAND)
-        outer.Add(buttons, 0, wx.ALL | wx.EXPAND, 10)
-        outer.Add(self.CreateButtonSizer(wx.CLOSE), 0, wx.ALL | wx.EXPAND, 10)
-        self.SetSizer(outer)
-        close = self.FindWindowById(wx.ID_CLOSE)
-        if close is not None:
-            close.Bind(wx.EVT_BUTTON, lambda _event: self.EndModal(wx.ID_CLOSE))
-        self._refresh()
-
-    def _refresh(self, select: str | None = None) -> None:
-        names = user_scripts.list_scripts(self._pack_dir) if self._pack_dir else []
-        self._list.Set(names)
-        if not names:
-            return
-        selection = names.index(select) if select in names else 0
-        self._list.SetSelection(selection)
-        self._list.SetFocus()
-
-    def _selected(self) -> str | None:
-        index = self._list.GetSelection()
-        return self._list.GetString(index) if index != wx.NOT_FOUND else None
-
-    def _request_reload(self) -> None:
-        panel = self._panel
-        if panel.app is not None:
-            panel._loop.call_soon_threadsafe(panel.app.reload_user_scripts, True)
-
-    def _save(self, name: str, source: str) -> bool:
-        if self._pack_dir is None:
-            return False
-        try:
-            user_scripts.validate_script(self._pack_dir, source)
-            user_scripts.save_script(self._pack_dir, name, source)
-        except Exception as error:  # noqa: BLE001 - syntax/storage errors stay in the editor
-            wx.MessageBox(
-                f"Script not saved: {type(error).__name__}: {error}",
-                "Automation script", wx.OK | wx.ICON_ERROR, self,
-            )
-            return False
-        self._announce(f"{name} saved. Reloading automation scripts.")
-        self._request_reload()
-        self._refresh(name)
-        return True
-
-    def _edit(self, name: str, source: str) -> bool:
-        current = source
-        while True:
-            dialog = AutomationScriptEditorDialog(self, name, current)
-            try:
-                if dialog.ShowModal() != wx.ID_OK:
-                    return False
-                current = dialog.source()
-            finally:
-                dialog.Destroy()
-            if self._save(name, current):
-                return True
-
-    def _on_new(self, _event: wx.CommandEvent) -> None:
-        if self._pack_dir is None:
-            return
-        dialog = wx.TextEntryDialog(
-            self, "Name the new Lua script. Scripts load alphabetically.",
-            "New automation script", value=user_scripts.DEFAULT_SCRIPT_NAME,
-        )
-        try:
-            if dialog.ShowModal() != wx.ID_OK:
-                return
-            try:
-                name = user_scripts.normalize_script_name(dialog.GetValue())
-            except ValueError as error:
-                wx.MessageBox(str(error), "Invalid script name", wx.OK | wx.ICON_ERROR, self)
-                return
-        finally:
-            dialog.Destroy()
-        existing = {item.casefold() for item in user_scripts.list_scripts(self._pack_dir)}
-        if name.casefold() in existing:
-            wx.MessageBox(
-                f"A script named {name} already exists.",
-                "Automation script", wx.OK | wx.ICON_INFORMATION, self,
-            )
-            return
-        self._edit(name, user_scripts.DEFAULT_SCRIPT)
-
-    def _on_edit(self, _event: wx.CommandEvent) -> None:
-        if self._pack_dir is None or (name := self._selected()) is None:
-            return
-        try:
-            source = user_scripts.read_script(self._pack_dir, name)
-        except OSError as error:
-            wx.MessageBox(str(error), "Couldn't open script", wx.OK | wx.ICON_ERROR, self)
-            return
-        self._edit(name, source)
-
-    def _on_rename(self, _event: wx.CommandEvent) -> None:
-        if self._pack_dir is None or (name := self._selected()) is None:
-            return
-        dialog = wx.TextEntryDialog(
-            self, "New script filename:", "Rename automation script", value=name,
-        )
-        try:
-            if dialog.ShowModal() != wx.ID_OK:
-                return
-            try:
-                renamed = user_scripts.rename_script(self._pack_dir, name, dialog.GetValue())
-            except (OSError, ValueError) as error:
-                wx.MessageBox(str(error), "Couldn't rename script", wx.OK | wx.ICON_ERROR, self)
-                return
-        finally:
-            dialog.Destroy()
-        self._announce(f"{name} renamed to {renamed}. Reloading automation scripts.")
-        self._request_reload()
-        self._refresh(renamed)
-
-    def _on_delete(self, _event: wx.CommandEvent) -> None:
-        if self._pack_dir is None or (name := self._selected()) is None:
-            return
-        if wx.MessageBox(
-            f"Delete {name}?", "Delete automation script",
-            wx.YES_NO | wx.ICON_QUESTION, self,
-        ) != wx.YES:
-            return
-        try:
-            user_scripts.delete_script(self._pack_dir, name)
-        except OSError as error:
-            wx.MessageBox(str(error), "Couldn't delete script", wx.OK | wx.ICON_ERROR, self)
-            return
-        self._announce(f"{name} deleted. Reloading automation scripts.")
-        self._request_reload()
-        self._refresh()
-
-    def _on_reload(self, _event: wx.CommandEvent) -> None:
-        self._refresh(self._selected())
-        self._request_reload()
-
-    def _on_open_folder(self, _event: wx.CommandEvent) -> None:
-        if self._pack_dir is None:
-            return
-        folder = user_scripts.scripts_dir(self._pack_dir)
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-            opened = wx.LaunchDefaultApplication(str(folder))
-        except OSError as error:
-            opened = False
-            detail = f": {error}"
-        else:
-            detail = ""
-        if not opened:
-            wx.MessageBox(
-                f"Couldn't open {folder}{detail}",
-                "Automation scripts", wx.OK | wx.ICON_ERROR, self,
-            )
 
 
 class HelpDialog(wx.Dialog):
@@ -2452,11 +2684,11 @@ class GenericMudFrame(wx.Frame):
         menubar.Append(packs_menu, "Sound&packs")
 
         automation_menu = wx.Menu()
-        builder_item = automation_menu.Append(wx.ID_ANY, "Visual rule &builder...\tCtrl+B")
-        scripts_item = automation_menu.Append(wx.ID_ANY, "Edit &scripts for this world...")
-        reload_scripts_item = automation_menu.Append(wx.ID_ANY, "&Reload scripts for this world")
+        automation_item = automation_menu.Append(
+            wx.ID_ANY, "&Manage automation...\tCtrl+B"
+        )
         automation_menu.AppendSeparator()
-        scripting_help_item = automation_menu.Append(wx.ID_ANY, "Scripting &help...")
+        automation_help_item = automation_menu.Append(wx.ID_ANY, "Automation &help...")
         menubar.Append(automation_menu, "&Automation")
 
         self._prefs = load_ui_prefs()
@@ -2506,13 +2738,11 @@ class GenericMudFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_browse_online, browse_item)
         self.Bind(wx.EVT_MENU, self._on_export_world, export_item)
         self.Bind(wx.EVT_MENU, self._on_import_world, import_item)
-        self.Bind(wx.EVT_MENU, self._on_rules_builder, builder_item)
-        self.Bind(wx.EVT_MENU, self._on_automation_scripts, scripts_item)
-        self.Bind(wx.EVT_MENU, self._on_reload_automation_scripts, reload_scripts_item)
+        self.Bind(wx.EVT_MENU, self._on_automation_manager, automation_item)
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._show_help("Automation scripting reference", help_text.SCRIPTING),
-            scripting_help_item,
+            lambda _e: self._show_help("Automation help", help_text.SCRIPTING),
+            automation_help_item,
         )
         self.Bind(wx.EVT_MENU, lambda _e: self.check_for_updates(manual=True), updates_item)
         self.Bind(wx.EVT_MENU, lambda _e: self.Close(), quit_item)
@@ -2740,42 +2970,18 @@ class GenericMudFrame(wx.Frame):
         else:
             self.announce("Not connected.")
 
-    def _on_rules_builder(self, _event: wx.CommandEvent) -> None:
+    def _on_automation_manager(self, _event: wx.CommandEvent) -> None:
         index = self.book.GetSelection()
         if index == wx.NOT_FOUND or not self.book.GetPageCount():
-            self.announce("Open a session first; rules are saved per world.")
+            self.announce("Open a session first; automation is saved per world.")
             return
         panel = self.book.GetPage(index)
         if panel.app is None or panel.app.user_rules_dir() is None:
             self.announce("This session isn't ready yet.")
             return
-        dialog = RulesBuilderDialog(self, panel, announce=self.announce)
+        dialog = AutomationManagerDialog(self, panel, announce=self.announce)
         dialog.ShowModal()
         dialog.Destroy()
-
-    def _on_automation_scripts(self, _event: wx.CommandEvent) -> None:
-        index = self.book.GetSelection()
-        if index == wx.NOT_FOUND or not self.book.GetPageCount():
-            self.announce("Open a session first; automation scripts are saved per world.")
-            return
-        panel = self.book.GetPage(index)
-        if panel.app is None or panel.app.user_rules_dir() is None:
-            self.announce("This session isn't ready yet.")
-            return
-        dialog = AutomationScriptsDialog(self, panel, announce=self.announce)
-        dialog.ShowModal()
-        dialog.Destroy()
-
-    def _on_reload_automation_scripts(self, _event: wx.CommandEvent) -> None:
-        index = self.book.GetSelection()
-        if index == wx.NOT_FOUND or not self.book.GetPageCount():
-            self.announce("Open a session first; there are no scripts to reload.")
-            return
-        panel = self.book.GetPage(index)
-        if panel.app is None:
-            self.announce("This session isn't ready yet.")
-            return
-        panel._loop.call_soon_threadsafe(panel.app.reload_user_scripts, True)
 
     def _on_frame_close(self, event: wx.CloseEvent) -> None:
         """Confirm before quitting if any session is live, then disconnect them all."""

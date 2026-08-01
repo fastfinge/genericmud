@@ -76,24 +76,53 @@ def test_bound_combos_dispatch_from_the_output_box_too():
     assert source.count("self._dispatch_bound_combo(") >= 2  # input AND output handlers
 
 
-def test_soundpacks_and_user_automation_have_distinct_menus_clear_of_retrace_key():
+def test_soundpacks_and_unified_automation_have_distinct_menus_clear_of_retrace_key():
     # Installed packs and user-authored automation are different jobs. Alt+R stays free for
-    # nav:retrace; the new Automation menu uses Alt+A.
+    # nav:retrace; Automation uses one manager instead of separate basic/script paths.
     source = _wx_source()
     assert '"Sound&packs"' in source
     assert '"&Automation"' in source
     assert '"R&ules"' not in source and '"&Rules"' not in source
-    assert '"Visual rule &builder...\\tCtrl+B"' in source
-    assert '"Edit &scripts for this world..."' in source
-    assert "AutomationScriptsDialog" in source
+    assert '"&Manage automation...\\tCtrl+B"' in source
+    assert '"Automation &help..."' in source
+    assert "AutomationManagerDialog" in source
+    assert "RulesBuilderDialog" not in source
+    assert "AutomationScriptsDialog" not in source
     assert '"Browse soundpacks &online...\\tCtrl+Shift+B"' in source
     assert '"alt+f", "alt+p", "alt+a", "alt+v", "alt+h"' in source
 
 
-def test_builder_validates_required_fields_instead_of_silently_dropping():
+def test_automation_manager_has_direct_categories_and_contextual_script_actions():
+    source = _wx_source()
+    for category in (
+        "Triggers — when the MUD sends text",
+        "Aliases — when I type a shortcut",
+        "Hotkeys — when I press a key",
+        "Channels — how matching lines are handled",
+        "Scripts — reusable Lua automation",
+    ):
+        assert category in source
+    assert 'self._buttons["rename"].Enable(has_item and is_script)' in source
+    assert 'self._buttons["reload"].Enable(is_script)' in source
+    assert 'self._buttons["folder"].Enable(is_script)' in source
+    assert 'self._buttons["new"].SetLabel(f"&New {singular}...")' in source
+    assert "wx.EVT_LISTBOX_DCLICK, self._on_edit" in source
+    assert 'if ord("1") <= code <= ord("5")' in source
+    assert 'if code == ord("N")' in source
+
+
+def test_automation_manager_validates_required_fields_instead_of_silently_dropping():
     source = _wx_source()
     assert "def _complete(self, kind" in source
-    assert "self._complete(kind, result)" in source  # edit path checks too, not just new
+    assert "self._complete(kind, result) and self._valid_rule(kind, result)" in source
+
+
+def test_rule_editors_accept_command_stacks_and_explain_shared_variables():
+    source = _wx_source()
+    assert "wx.TE_MULTILINE | wx.TE_DONTWRAP" in source
+    assert "Commands to send, one per line" in source
+    assert "${script:name}" in source
+    assert "${mud:HEALTH}" in source
 
 
 def test_self_voice_toggle_announces():

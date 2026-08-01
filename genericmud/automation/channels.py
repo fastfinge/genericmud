@@ -29,9 +29,27 @@ class ChannelRouter:
 
     def __init__(self) -> None:
         self._policies: dict[str, ChannelPolicy] = {}
+        self._policy_bindings: list[tuple[str, str, ChannelPolicy]] = []
 
-    def set_policy(self, channel: str, policy: ChannelPolicy) -> None:
+    def set_policy(
+        self, channel: str, policy: ChannelPolicy, *, source: str = ""
+    ) -> None:
+        self._policy_bindings = [
+            binding
+            for binding in self._policy_bindings
+            if not (binding[0] == channel and binding[1] == source)
+        ]
+        self._policy_bindings.append((channel, source, policy))
         self._policies[channel] = policy
+
+    def remove_source(self, source: str) -> None:
+        """Remove one retiring automation source and restore shadowed policies."""
+        self._policy_bindings = [
+            binding for binding in self._policy_bindings if binding[1] != source
+        ]
+        self._policies = {}
+        for channel, _source, policy in self._policy_bindings:
+            self._policies[channel] = policy
 
     def policy(self, channel: str) -> ChannelPolicy:
         return self._policies.get(channel, ChannelPolicy())

@@ -7,6 +7,28 @@ fails the build on purpose.
 
 Entries start at 0.7.1. Earlier releases were tagged before this file existed.
 
+## 0.9.1 — 2026-08-01
+
+**Automation now has one place to work**
+
+* Ctrl+B opens the Automation Manager. Triggers, aliases, hotkeys, channels,
+  and Lua scripts are categories in that one dialog instead of separate simple
+  and advanced tools.
+* New, Edit, Duplicate, and Delete work from the selected category. Triggers,
+  aliases, hotkeys, and channels can also be disabled without deleting them.
+  Script-only actions such as Rename, Reload Scripts, and Open Scripts Folder
+  become available when Scripts is selected.
+
+**Ordinary automation can do more without code**
+
+* A trigger, alias, or hotkey can send one command or several commands, one per
+  line.
+* Command fields can combine matched text, values saved by scripts, and current
+  GMCP, MSDP, or MSSP data. The complete sequence is checked before any command
+  is sent.
+* The manual and offline help now explain the unified manager, its keyboard
+  shortcuts, command variables, and when Lua is useful in plain language.
+
 ## 0.9.0 — 2026-08-01
 
 **Simple rules and advanced scripts now share one Automation menu**

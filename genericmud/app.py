@@ -309,7 +309,7 @@ class EngineApp:
         # settings (volumes, toggles) across sessions -- with nothing seeded, every
         # launch silently reset them to defaults.
         self._restore_pack_vars()
-        self.reload_user_rules()  # dialog-built rules load alongside installed packs
+        self.reload_user_rules()  # field-based automation loads alongside installed packs
         self.reload_user_scripts()
         result = self.activate_packs(world)
         if self._diag is not None:
@@ -415,7 +415,7 @@ class EngineApp:
         return Path(root).parent / "userpacks" / sanitize_component(self.name)
 
     def reload_user_rules(self) -> None:
-        """(Re)register the world's dialog-built rules; safe to call live after a save.
+        """(Re)register the world's field-based automation; safe to call live after a save.
 
         Validates the new rules against a throwaway engine BEFORE removing the live ones, so a
         rule with a bad advanced-regex can't clear every user rule and leave the world silent

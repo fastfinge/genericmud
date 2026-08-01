@@ -1,38 +1,109 @@
-# Scripting and advanced automation
+# Automation and Lua scripting
 
-This guide explains how to make aliases, triggers, hotkeys, timers, and command
-sequences with Lua scripts. You do not need to know Lua before you start. Each
-example is complete enough to copy into a script.
+This guide explains the Automation Manager first, then Lua scripting. You do
+not need to know Lua to make a trigger, alias, or hotkey. The Lua examples are
+complete enough to copy when you need them.
 
-Scripts belong to one saved world. A script for one MUD does not run in your
-other worlds.
+All automation belongs to one saved world. An alias or script for one MUD does
+not run in your other worlds.
 
-## Should I use the rule builder or a script?
-
-Use **Automation > Visual rule builder** for ordinary triggers, aliases, and
-hotkeys. It does not require code.
-
-Use a script when you need one of these:
-
-- several commands from one alias or trigger;
-- values remembered between commands or sessions;
-- data sent by the MUD through GMCP, MSDP, or MSSP;
-- a decision, such as doing one thing when health is low and another when it is
-  high;
-- a timer;
-- several rules that work together.
-
-Both systems can be used in the same world.
-
-## Open the script editor
+## Start in the Automation Manager
 
 1. Connect to the saved world you want to change.
-2. Open the **Automation** menu.
-3. Choose **Edit scripts for this world**.
+2. Press **Ctrl+B**, or choose **Automation > Manage automation**.
+3. In the **Show** box, choose **Triggers**, **Aliases**, **Hotkeys**,
+   **Channels**, or **Scripts**.
 4. Choose **New**.
-5. Enter a name such as `10-basics.lua`.
-6. Paste or type your script.
-7. Choose **Save and reload**.
+
+These are categories in one manager, not separate simple and advanced tools:
+
+- A **trigger** reacts to a matching line from the MUD.
+- An **alias** replaces a shortcut you type with one or more commands.
+- A **hotkey** runs actions when you press a chosen key combination.
+- A **channel** controls whether routed lines are spoken, shown, or allowed to
+  interrupt speech.
+- A **script** contains reusable Lua automation.
+
+Choose an item and press Enter to edit it. **Duplicate** opens a copy that you
+can change. **Disable** keeps an ordinary item saved without letting it run.
+Delete asks for confirmation. The manager remembers the category you last
+used.
+
+Keyboard shortcuts inside the manager:
+
+- **Ctrl+1** through **Ctrl+5** show the five categories in order.
+- **Ctrl+N** creates an item in the category being shown.
+- **Enter** edits the selected item.
+- **Delete** deletes the selected item after confirmation.
+- **F2** renames the selected script.
+
+## Make an alias without writing code
+
+1. Show **Aliases** and choose **New**.
+2. In **When I type**, enter a shortcut such as `combo *`. The asterisk catches
+   the text after `combo`.
+3. In **Commands to send**, enter one command per line:
+
+   ```text
+   stand
+   kill ${1}
+   consider ${1}
+   ```
+
+4. Add an optional spoken confirmation, then choose **OK**.
+
+Typing `combo goblin` now sends `stand`, `kill goblin`, and `consider goblin`.
+The older `%1` spelling still works, but `${1}` also works in Lua and is easier
+to use consistently.
+
+## Make a trigger without writing code
+
+1. Show **Triggers** and choose **New**.
+2. Enter the text to watch for. **The line contains this text** is usually the
+   right match choice. Wildcards, exact whole lines, and regular expressions
+   are also available.
+3. Fill in any actions you need: commands, spoken text, a sound, speech
+   interruption, hiding the line, or routing it to a channel.
+4. Choose **OK**. The trigger works on the next matching line.
+
+Hotkeys use the same command field. Focus **Press the key combination**, press
+the keys you want, and enter one or more commands. A trigger, alias, or hotkey
+can use these values in a command:
+
+- `${1}` is the first wildcard or regular-expression capture. `${2}` is the
+  second. A named regular-expression capture can be used as `${target}`.
+- `${script:name}` reads a value saved with `mud.set_var` by any script or
+  compatible soundpack in this world.
+- `${mud:HEALTH}` or `${mud:Char.Vitals.hp}` reads live data sent by the MUD.
+
+genericMud fills in the complete command sequence before sending its first
+command. If one value is missing, none of the sequence is sent. This avoids
+running half of an action. genericMud speaks each distinct missing-value problem
+once and records repeated occurrences in the diagnostic log. One item can send
+at most 100 commands at a time.
+
+## When Lua is useful
+
+Ordinary trigger, alias, and hotkey fields already support multiple commands
+and variable values. Use a Lua script when the automation needs one of these:
+
+- a decision, such as healing only when health is low;
+- a timer;
+- changing or saving a variable;
+- reusable functions or several rules that work together;
+- custom speech, sound, or cross-session behavior.
+
+Scripts and field-based items can work together. A script can save a value and
+an ordinary alias can use that value in `${script:name}`.
+
+## Open the Lua editor
+
+1. Open the Automation Manager with **Ctrl+B**.
+2. Show **Scripts**.
+3. Choose **New**.
+4. Enter a name such as `10-basics.lua`.
+5. Paste or type your script.
+6. Choose **Save and reload**.
 
 The `.lua` ending is added if you leave it out. A saved script starts working
 immediately. You do not need to disconnect.
@@ -41,9 +112,9 @@ If the code is not valid, genericMud explains that it was not saved and leaves
 your text in the editor. If a group of scripts cannot reload, the last working
 group keeps running.
 
-Choose **Open scripts folder** if you prefer another text editor. After editing
-a file outside genericMud, choose **Reload all** in the script manager or
-**Automation > Reload scripts for this world**.
+In the **Scripts** category, choose **Open scripts folder** if you prefer
+another text editor. After editing a file outside genericMud, choose
+**Reload scripts** in the same category.
 
 ## Your first alias
 
@@ -528,8 +599,8 @@ After saving it:
 
 Check these in order:
 
-1. Choose **Automation > Reload scripts for this world**. genericMud speaks how
-   many scripts loaded or reads the first reload error.
+1. Press **Ctrl+B**, show **Scripts**, and choose **Reload scripts**. genericMud
+   speaks how many scripts loaded or reads the first reload error.
 2. Test a simple alias that calls `mud.echo`. This tells you whether the script
    loaded and the pattern matched.
 3. Check spelling and capitalization in the text received from the MUD.

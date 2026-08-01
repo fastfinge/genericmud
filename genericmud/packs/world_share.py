@@ -1,6 +1,6 @@
 """Share one world's whole setup as a single zip (the MUDBall pack-sharing flow).
 
-Export bundles the world's connection details, builder rules, copied sounds,
+Export bundles the world's connection details, field-based automation, copied sounds,
 and sandboxed automation scripts into one file a friend can be sent; import
 unpacks that file into the local userpacks tree and hands back a :class:`World`
 ready to save and connect. The zip layout is flat and boring on purpose::

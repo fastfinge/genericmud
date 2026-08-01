@@ -40,14 +40,13 @@ diagonals, 5 or 0 look, period scans, minus up, plus down (turn this off in
 the View menu if NVDA needs your numpad). Type .3n2e to speedwalk. Alt+B
 drops a breadcrumb and Alt+R walks you back to it.
 
-Triggers and sounds:
-Ctrl+B opens the visual rule builder. Ctrl+Shift+B browses soundpacks online.
-A trigger watches for text and can play
-a sound, speak, send a command, hide the line, or interrupt speech — the
-simple match is "the line contains this text", no scripting needed. Soundpacks
-menu, Browse soundpacks online fetches ready-made packs. Advanced users can open
-Automation menu, Edit scripts for this world to write sandboxed Lua triggers,
-aliases, timers, and variable-aware command sequences.
+Automation and sounds:
+Ctrl+B opens the Automation Manager. Its Show box contains Triggers, Aliases,
+Hotkeys, Channels, and Scripts. A trigger watches text from the MUD. An alias
+replaces a shortcut you type. A hotkey reacts to a chosen key combination.
+Each can send one command or several commands, one per line, without writing
+code. The Scripts category has the Lua editor for decisions, timers, saved
+values, and reusable automation. Ctrl+Shift+B browses ready-made soundpacks.
 
 Sharing:
 File menu, Export This World saves your whole setup — connection, triggers,
@@ -58,16 +57,43 @@ The full shortcut list is under Help, Keyboard Shortcuts.
 """
 
 SCRIPTING = """\
-Automation scripting
+Automation and Lua scripting
 
 Start here:
-Connect to the saved world you want to change. Open the Automation menu and
-choose Edit scripts for this world. Choose New, enter a name such as
-10-combat.lua, and choose Save and reload when you finish.
+Connect to the saved world you want to change. Press Ctrl+B or open the
+Automation menu and choose Manage automation. In the Show box, choose Triggers,
+Aliases, Hotkeys, Channels, or Scripts. They are categories in one manager.
 
-Scripts belong to one world. They start working as soon as they save. If a save
-has an error, your text stays in the editor and the working script is not
-replaced. Scripts load in alphabetical order.
+Make an alias without code:
+Show Aliases and choose New. In When I type, enter combo *. In Commands to send,
+put these commands on separate lines:
+stand
+kill ${1}
+consider ${1}
+
+Choose OK. Typing combo goblin now sends all three commands, with goblin in
+place of ${1}. The older %1 spelling still works.
+
+Make a trigger without code:
+Show Triggers and choose New. Enter the text to watch for. The line contains
+this text is usually the right match choice. Add any commands, spoken text,
+sound, line handling, or channel routing you need, then choose OK.
+
+Trigger, alias, and hotkey command fields accept one command per line. ${1}
+means the first matched part. ${script:attack} reads a value saved by a script.
+${mud:HEALTH} reads live data sent by the MUD. genericMud fills in every command
+before it sends the first one. If a value is missing, none are sent and genericMud
+speaks the problem once.
+
+Choose Duplicate to start from a copy. Disable keeps an item saved without
+letting it run. Ctrl+1 through Ctrl+5 change categories, Ctrl+N creates an item,
+Enter edits, and Delete deletes after confirmation. F2 renames a script.
+
+Open the Lua editor:
+Show Scripts and choose New. Enter a name such as 10-combat.lua. Choose Save
+and reload when you finish. Scripts belong to one world and load in alphabetical
+order. If a save has an error, your text stays in the editor and the working
+script is not replaced.
 
 Your first alias:
 mud.alias("sc", function()
@@ -210,9 +236,14 @@ Alt+S             Stop walking
 
 Tools:
 Ctrl+P            Manage soundpacks
-Ctrl+B            Visual rule builder
+Ctrl+B            Open the Automation Manager
 Ctrl+Shift+B      Browse soundpacks online
-Automation menu   Edit or reload per-world Lua scripts; open scripting help
+Automation Manager:
+Ctrl+1 to 5       Show triggers, aliases, hotkeys, channels, or scripts
+Ctrl+N            Create an item in the category being shown
+Enter / Delete    Edit / delete the selected item
+F2                Rename the selected script
+Automation menu   Manage per-world automation; open automation help
 Alt+Shift+L       Log this session to a file
 Alt+Shift+D       Speak the diagnostic log location and summary
 """
