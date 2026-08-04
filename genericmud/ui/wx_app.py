@@ -1255,7 +1255,7 @@ class VaultBrowserDialog(wx.Dialog):
         self._store = store
         self._announce = announce  # speak status for screen-reader users
         self._diag = diag  # durable install trace (DiagnosticLog or None)
-        self._last_milestone = 0  # throttle spoken download progress to 25% steps
+        self._last_milestone = 0  # throttles the spoken MB / file-count lines, not the gauge
         self._all_packs: list = []  # the full catalogue
         self._packs: list = []  # visible subset, parallel to the list box (what _selected indexes)
         self.result = None  # SetupResult once a pack is downloaded + set up
@@ -1498,7 +1498,12 @@ class VaultBrowserDialog(wx.Dialog):
         return self._fill_world(result, pack.mud)
 
     def _sync_progress(self, done: int, total: int, relpath: str) -> None:  # background thread
-        """Per-file sync progress: drive the gauge and speak every 10% (packs have ~9000 files)."""
+        """Per-file sync progress: drive the gauge, speak file counts every 10%.
+
+        The percentage is the gauge's job. The counts are spoken because a ~9000-file
+        sync is long enough that "how many files, out of how many" is the reassuring
+        part, and no progress bar conveys it.
+        """
         if not total:
             return
         pct = min(int(done * 100 / total), 100)
@@ -1506,7 +1511,7 @@ class VaultBrowserDialog(wx.Dialog):
         milestone = pct - pct % 10
         if milestone and milestone != self._last_milestone:
             self._last_milestone = milestone
-            self._status(f"Synced {done} of {total} files ({pct} percent).")
+            self._status(f"Synced {done} of {total} files.")
 
     def _follow_installer(self, extracted, tmp):  # background thread
         """If the download is just a Windows installer, fetch the repo it git-clones
@@ -1542,14 +1547,14 @@ class VaultBrowserDialog(wx.Dialog):
 
     def _progress(self, done: int, total: int) -> None:  # background thread
         if total:
-            pct = min(int(done * 100 / total), 100)
-            wx.CallAfter(self._set_gauge, pct)
-            milestone, label = pct - pct % 25, f"{pct - pct % 25} percent"  # 25/50/75/100
-        else:  # no Content-Length (GitLab archives) -> report MB, every 50 MB
-            milestone, label = done // 50_000_000, f"{done // 1_000_000} MB"
+            wx.CallAfter(self._set_gauge, min(int(done * 100 / total), 100))
+            return  # NVDA reports the gauge itself; see UpdateProgressDialog's docstring
+        # No Content-Length (GitLab archives): nothing drives the gauge, so there's no
+        # progress bar for NVDA to read and speech is the only channel left. Every 50 MB.
+        milestone = done // 50_000_000
         if milestone and milestone != self._last_milestone:
             self._last_milestone = milestone
-            self._status(f"Downloaded {label}.")
+            self._status(f"Downloaded {done // 1_000_000} MB.")
 
     def _on_setup_done(self, outcome) -> None:
         if not self._alive:
