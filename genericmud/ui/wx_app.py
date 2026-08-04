@@ -2572,7 +2572,21 @@ class UpdateNotificationDialog(wx.Dialog):
 
 
 class UpdateProgressDialog(wx.Dialog):
-    """Self-update progress: a status log, a gauge, spoken 25% milestones, and Cancel.
+    """Self-update progress: a status log, a gauge, spoken phase changes, and Cancel.
+
+    Division of labour between the two channels, which is easy to get wrong in both
+    directions: the gauge carries *how far along*, speech carries *which phase*.
+
+    Don't speak percentages. A wx.Gauge is a native msctls_progress32 reporting
+    ROLE_SYSTEM_PROGRESSBAR, so NVDA already tracks it -- beeping at every 1% by
+    default, or speaking every 10% if the user chose speech instead. Announcing our
+    own milestones on top of that is both redundant and coarser than what the user
+    asked for, and it talks over a deliberate "progress bar output: off".
+
+    Do speak phase changes. _status_log is an unfocused read-only TextCtrl, and wx has
+    no live-region equivalent on MSW, so appended text reaches no screen reader. Speech
+    is the only channel for "download finished, now extracting" -- which no
+    accessibility API infers from a gauge sitting at 100%.
 
     Deliberately a plain owned dialog, NOT wx.ProgressDialog: on MSW that runs a native
     task dialog on its own thread and PD_AUTO_HIDE dismisses it the instant Update()
@@ -2591,7 +2605,6 @@ class UpdateProgressDialog(wx.Dialog):
         super().__init__(parent, title="Updating genericMud")
         self._announce = announce
         self._cancelled = cancelled
-        self._last_milestone = 0  # throttle spoken download progress to 25% steps
         self._setup_announced = False  # one-time "setting up" line after the last callback
 
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -2623,12 +2636,8 @@ class UpdateProgressDialog(wx.Dialog):
             self._gauge.Pulse()
             return
         pct = min(done * 100 // total, 100)
-        self._gauge.SetValue(pct)
-        milestone = pct // 25 * 25
-        if pct < 100 and milestone > self._last_milestone:
-            self._last_milestone = milestone
-            self._status(f"Downloaded {milestone} percent.")
-        elif pct >= 100 and not self._setup_announced:
+        self._gauge.SetValue(pct)  # NVDA reports this itself; see the class docstring
+        if pct >= 100 and not self._setup_announced:
             self._setup_announced = True
             self._status("Download finished. Setting up the update.")
 
