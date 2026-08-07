@@ -75,13 +75,17 @@ def test_msdp_room_reports_build_the_graph_too():
 
 
 def test_a_server_that_reports_no_real_room_id_is_refused_not_mismapped():
-    """Captured live from EmpireMUD 2.0 beta 5 (KaVir protocol snippet) over MSDP.
+    """Captured live from EmpireMUD 2.0 beta 5 over MSDP, playing as an ordinary mortal.
 
-    It reports every map tile as VNUM 0 with an empty EXITS table, because its world is a
-    coordinate grid rather than numbered rooms with discrete exits (and its COORDS come
-    through as 0,0,0 as well). Accepting VNUM 0 as an identity would fuse the entire game
-    into a single node whose name is whatever was seen last, and route the player from a
-    room they are not in. Declining to map it is the correct outcome.
+    EmpireMUD withholds room identity from non-immortals on purpose: its MSDP room update
+    sends ``IS_IMMORTAL(ch) ? GET_ROOM_VNUM(...) : 0`` for both the room and every exit
+    destination, and only fills EXITS at all inside a closed room. So a normal player sees
+    every single room in the game claiming to be room 0.
+
+    That is the case this guards. Accepting 0 as an identity would fuse the whole game into
+    one node named after whichever room was seen last, and route the player from a room they
+    are not standing in. A server may have perfectly good room numbers and still decline to
+    tell this player what they are, so refusing to map is the only safe reading.
     """
     app, backend, _sent, _scheduled = _app()
     tower = (
@@ -111,6 +115,76 @@ def test_a_server_that_reports_no_real_room_id_is_refused_not_mismapped():
     backend.spoken.clear()
     app.on_ws_message({"type": "input", "text": "/goto forest"})
     assert "no map yet" in _spoken(backend)
+
+
+def _empire_room(vnum, name, area, exits, terrain="Inside"):
+    """One EmpireMUD MSDP ROOM table, in the exact field order comm.c writes.
+
+    Built from EmpireMUD 2.0 beta 5 ``update_MSDP_room`` (src/comm.c): a ROOM table of
+    VNUM, NAME, AREA, COORDS, TERRAIN, EXITS, with EXITS a nested table of direction to
+    destination vnum. Direction names are ``alt_dirs`` (src/constants.c:1514) — the short
+    compass forms plus the ship-relative fo/st/po/af.
+    """
+    var, val, open_table, close_table = b"\x01", b"\x02", b"\x03", b"\x04"
+    body = (
+        var + b"VNUM" + val + str(vnum).encode()
+        + var + b"NAME" + val + name.encode()
+        + var + b"AREA" + val + area.encode()
+        + var + b"COORDS" + val + open_table
+        + var + b"X" + val + b"0" + var + b"Y" + val + b"0" + var + b"Z" + val + b"0"
+        + close_table
+        + var + b"TERRAIN" + val + terrain.encode()
+        + var + b"EXITS" + val + open_table
+    )
+    for direction, destination in exits.items():
+        body += var + direction.encode() + val + str(destination).encode()
+    body += close_table
+    return var + b"ROOM" + val + open_table + body + close_table
+
+
+def test_a_real_servers_immortal_room_reports_build_a_routable_graph():
+    """The other side of the EmpireMUD case: what it sends a player it trusts with vnums.
+
+    Its MSDP room update gives real room and exit vnums to immortals, and fills EXITS
+    inside a closed room, so those sessions carry everything a map needs. Payload shape
+    taken from the server's own source rather than assumed.
+    """
+    app, backend, sent, _scheduled = _app()
+    # A three-room building plus a ship deck reached by a ship-relative exit.
+    rooms = [
+        _empire_room(1200, "The Great Hall", "Newhaven", {"n": 1201, "e": 1202}),
+        _empire_room(1201, "A Storeroom", "Newhaven", {"s": 1200}),
+        _empire_room(1202, "The Guildhall Vault", "Newhaven", {"w": 1200, "fo": 1203}),
+        _empire_room(1203, "The Foredeck", "Newhaven", {"af": 1202}),
+        _empire_room(1200, "The Great Hall", "Newhaven", {"n": 1201, "e": 1202}),
+    ]
+    for payload in rooms:
+        app.on_telnet_event(Subnegotiation(OPT_MSDP, payload))
+
+    assert set(app.map.rooms) == {"1200", "1201", "1202", "1203"}
+    assert app.map.here == "1200"
+    assert app.map.rooms["1200"].area == "Newhaven"
+    assert app.map.rooms["1202"].exits == {"w": "1200", "fo": "1203"}
+
+    # Routing across rooms the player never walked in this order, including through the
+    # ship-relative exit a compass can't express.
+    assert app.map.path_to("1203") == ["e", "fo"]
+
+    backend.spoken.clear()
+    app.on_ws_message({"type": "key", "key": "alt+m"})
+    spoken = _spoken(backend)
+    assert "The Great Hall" in spoken and "in Newhaven" in spoken
+    assert "n to A Storeroom" in spoken
+
+    sent.clear()
+    backend.spoken.clear()
+    app.on_ws_message({"type": "input", "text": "/goto foredeck"})
+    assert "walking to The Foredeck, 2 steps" in _spoken(backend)
+    assert sent == ["e"]
+    app.on_telnet_event(Subnegotiation(OPT_MSDP, rooms[2]))  # arrived at the vault
+    assert sent == ["e", "fo"]
+    app.on_telnet_event(Subnegotiation(OPT_MSDP, rooms[3]))  # arrived at the foredeck
+    assert "arrived" in _spoken(backend)
 
 
 def test_alt_m_reads_the_room_and_its_exits():
