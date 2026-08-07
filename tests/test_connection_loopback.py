@@ -116,9 +116,17 @@ async def test_ttype_cycle_restarts_on_each_connection():
     port = server.sockets[0].getsockname()[1]
 
     conn = MudConnection()
-    for _ in range(2):
+    for expected in (1, 2):
         await conn.connect("127.0.0.1", port)
-        await _wait_for(lambda: per_connection and b"GENERICMUD" in bytes(per_connection[-1]))
+        # Wait for THIS connection's buffer to appear before looking at its contents.
+        # connect() returns as soon as the client has a socket, which can be before the
+        # server's handler has run, and until it does per_connection[-1] is still the
+        # PREVIOUS connection's buffer — already holding GENERICMUD. Checking contents
+        # first therefore passes instantly and closes the socket before the client has
+        # answered TTYPE, leaving this connection's buffer empty. It's a race, so it
+        # passed on fast runners and failed on loaded ones.
+        assert await _wait_for(lambda n=expected: len(per_connection) == n)
+        assert await _wait_for(lambda: b"GENERICMUD" in bytes(per_connection[-1]))
         await conn.close()
 
     server.close()
