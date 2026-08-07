@@ -18,6 +18,7 @@ from dataclasses import dataclass
 DEFAULT_VOLUME = 100
 DEFAULT_REPEATS = 1
 DEFAULT_PRIORITY = 50
+STOP_CUE = "off"  # !!SOUND(Off)/!!MUSIC(Off): the spec's stop request, not a filename
 
 _SOUND_RE = re.compile(r"!!SOUND\((?P<body>[^)]*)\)")
 _MUSIC_RE = re.compile(r"!!MUSIC\((?P<body>[^)]*)\)")
@@ -32,6 +33,18 @@ class SoundCue:
     priority: int = DEFAULT_PRIORITY
     type: str = ""
     url: str = ""
+
+    @property
+    def is_stop(self) -> bool:
+        """``!!MUSIC(Off)`` is the only way a server ends music it started, so treating
+        ``Off`` as a filename leaves the track looping for the rest of the session."""
+        return self.file.casefold() == STOP_CUE
+
+    @property
+    def loops_forever(self) -> bool:
+        """``L=-1`` means loop until stopped — how servers start ambience. A finite count
+        above 1 has no bus equivalent (play once or loop), so it plays once."""
+        return self.repeats < 0
 
 
 def parse_msp_line(text: str) -> tuple[str, list[SoundCue]]:

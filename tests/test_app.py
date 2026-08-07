@@ -162,6 +162,32 @@ def test_msp_line_emits_sound_and_strips_tag():
     assert any("A thud" in s and "!!SOUND" not in s for s in backend.spoken)
 
 
+def test_msp_off_stops_the_music_it_started():
+    app, _backend, _sent, posted = _app()
+    app.on_telnet_event(DataReceived(b"You enter the tavern !!MUSIC(tavern.mid V=50)\r\n"))
+    music = [m for m in posted if m["type"] == "music"]
+    assert music and music[0]["file"] == "tavern.mid"
+    assert abs(music[0]["gain"] - 0.5) < 1e-9  # V= applies to music, not just sound
+    # Music loops until the server stops it, and !!MUSIC(Off) is the only stop it has.
+    app.on_telnet_event(DataReceived(b"You leave !!MUSIC(Off)\r\n"))
+    assert any(m["type"] == "stop_sound" and m["channel"] == "music" for m in posted)
+    assert [m for m in posted if m["type"] == "music"] == music  # "Off" is not a file
+
+
+def test_msp_sound_off_stops_effects():
+    app, _backend, _sent, posted = _app()
+    app.on_telnet_event(DataReceived(b"a !!SOUND(Off)\r\n"))
+    assert any(m["type"] == "stop_sound" and m["channel"] == "sound" for m in posted)
+
+
+def test_msp_infinite_loop_count_reaches_the_backend():
+    app, _backend, _sent, posted = _app()
+    app.on_telnet_event(DataReceived(b"Rain falls !!SOUND(rain.wav L=-1)\r\n"))
+    app.on_telnet_event(DataReceived(b"A thud !!SOUND(hit.wav)\r\n"))
+    loops = {m["file"]: m["loop"] for m in posted if m["type"] == "sound"}
+    assert loops == {"rain.wav": True, "hit.wav": False}
+
+
 def test_msp_blocks_unsafe_sound_paths():
     app, _backend, _sent, posted = _app()
     # A hostile MUD sends absolute / UNC / traversal sound paths; none may be played.

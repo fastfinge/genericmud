@@ -87,6 +87,18 @@ def test_msp_sound_and_music_extracted():
     assert cues[1].kind == "music" and cues[1].file == "theme.mid" and cues[1].repeats == -1
 
 
+def test_msp_off_is_a_stop_request_not_a_filename():
+    _clean, cues = parse_msp_line("!!MUSIC(Off) !!SOUND(off)")
+    assert [cue.is_stop for cue in cues] == [True, True]
+    _clean, cues = parse_msp_line("!!SOUND(offer.wav)")
+    assert cues[0].is_stop is False
+
+
+def test_msp_negative_loop_count_means_loop_until_stopped():
+    _clean, cues = parse_msp_line("!!SOUND(rain.wav L=-1) !!SOUND(hit.wav) !!SOUND(bell.wav L=3)")
+    assert [cue.loops_forever for cue in cues] == [True, False, False]
+
+
 def test_msp_line_without_tags_is_unchanged():
     clean, cues = parse_msp_line("just plain text")
     assert clean == "just plain text"

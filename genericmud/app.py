@@ -40,7 +40,7 @@ from genericmud.session.credentials import CredentialStore
 from genericmud.session.hub import SessionHub
 from genericmud.session.log import SessionLogger
 from genericmud.session.login import AutoLogin
-from genericmud.sound.bus import SoundBackend, SoundBus
+from genericmud.sound.bus import DEFAULT_CATEGORY, MUSIC_CATEGORY, SoundBackend, SoundBus
 from genericmud.voice.router import VoiceRouter
 
 if TYPE_CHECKING:
@@ -639,6 +639,12 @@ class EngineApp:
     def _emit_line(self, text: str) -> None:
         text, cues = parse_msp_line(text)  # strip MSP markers before colour parsing
         for cue in cues:
+            channel = MUSIC_CATEGORY if cue.kind == "music" else DEFAULT_CATEGORY
+            if cue.is_stop:
+                if self._diag is not None:
+                    self._diag.event("msp.cue", kind=cue.kind, stop=True)
+                self.sound.stop(channel)
+                continue
             # MSP filenames come straight from the untrusted server. Block the dangerous shapes
             # (absolute / UNC / drive / ..) so a hostile MUD can't open an arbitrary file -- a
             # Windows UNC path leaks the NTLM hash on open, before decode even fails. A safe
@@ -650,9 +656,11 @@ class EngineApp:
             if self._diag is not None:
                 self._diag.event("msp.cue", kind=cue.kind, file=cue.file, volume=cue.volume)
             if cue.kind == "music":
-                self.sound.music(cue.file)
+                self.sound.music(cue.file, channel, gain=cue.volume / 100.0)
             else:
-                self.sound.play(cue.file, gain=cue.volume / 100.0)
+                self.sound.play(
+                    cue.file, channel, gain=cue.volume / 100.0, loop=cue.loops_forever
+                )
         spans = parse_ansi(text)
         plain = "".join(span.text for span in spans)
         if not plain.strip():

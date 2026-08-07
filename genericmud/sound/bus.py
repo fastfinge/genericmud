@@ -95,9 +95,9 @@ class SoundBus:
         self._playing.add(channel)
         self._backend.play(file, channel, self.effective_gain(channel, gain), pan, loop)
 
-    def music(self, file: str, channel: str = MUSIC_CATEGORY) -> None:
+    def music(self, file: str, channel: str = MUSIC_CATEGORY, gain: float = 1.0) -> None:
         self._playing.add(channel)
-        self._backend.music(file, channel, self.effective_gain(channel))
+        self._backend.music(file, channel, self.effective_gain(channel, gain))
 
     def stop(self, channel: str) -> None:
         self._playing.discard(channel)
