@@ -10,11 +10,13 @@ parsed event to a consumer callback. TLS is just an ``ssl`` context passed to
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from genericmud import __version__
 from genericmud.protocol import telnet as T
 from genericmud.protocol.telnet import (
     Event,
@@ -24,11 +26,46 @@ from genericmud.protocol.telnet import (
 )
 
 _READ_CHUNK = 4096
-TERMINAL_TYPE = b"GENERICMUD"
+CLIENT_NAME = "genericMud"
 DEFAULT_COLUMNS = 120
 DEFAULT_ROWS = 40
 _TTYPE_SEND = 1  # IAC SB TTYPE SEND ... — server requests our terminal type
 _TTYPE_IS = 0  # IAC SB TTYPE IS <name> IAC SE — our reply
+
+# MTTS (MUD Terminal Type Standard) capability bits. Only claim what we actually do:
+# ANSI/256/truecolour because render/ansi.py parses all three, UTF-8 because that's the
+# decode we try first, SSL because connect() takes a TLS context. VT100 cursor control,
+# mouse tracking, OSC palette, MNES and MSLP are unimplemented, so their bits stay clear.
+MTTS_ANSI = 1
+MTTS_UTF8 = 4
+MTTS_256_COLORS = 8
+# The reason this whole handshake matters here: MUDs that honour the screen-reader bit
+# suppress ASCII art, maps and progress bars, which is exactly what a self-voicing client
+# wants. genericMud is always a screen-reader client, so this bit is never conditional.
+MTTS_SCREEN_READER = 64
+MTTS_TRUECOLOR = 256
+MTTS_SSL = 2048
+MTTS_BITS = (
+    MTTS_ANSI | MTTS_UTF8 | MTTS_256_COLORS | MTTS_SCREEN_READER | MTTS_TRUECOLOR | MTTS_SSL
+)
+# MTTS answers successive TTYPE SEND requests with client name, then terminal type, then the
+# capability bitvector; repeating the last entry is how a client signals the cycle has ended.
+TTYPE_CYCLE = (CLIENT_NAME.upper().encode(), b"ANSI", f"MTTS {MTTS_BITS}".encode())
+
+# GMCP packages we ask the server to send. Servers that follow the spec (Aardwolf, the IRE
+# MUDs and most Evennia games) stream nothing at all until this arrives, so the parser and
+# every consumer above it stay dark without it. Only list packages something here can use:
+# Room drives navigation ("where am I", adaptive safe-walk), the rest reach soundpacks via
+# dispatch_gmcp. Media packages we can't play are deliberately absent.
+GMCP_SUPPORTS = (
+    "Char 1",
+    "Char.Items 1",
+    "Char.Skills 1",
+    "Char.Vitals 1",
+    "Comm.Channel 1",
+    "Group 1",
+    "Room 1",
+)
 
 # Remote (server-side WILL) options we accept by replying DO.
 # MSP carries no subnegotiation of its own — the cues are inline !!SOUND/!!MUSIC tags —
@@ -79,6 +116,7 @@ class MudConnection:
         self._read_task: asyncio.Task[None] | None = None
         self._remote_enabled: set[int] = set()
         self._local_enabled: set[int] = set()
+        self._ttype_cycle = 0  # position in TTYPE_CYCLE; per-connection, reset in connect()
         # Auto-reconnect (off by default; the UI enables it and wires on_status).
         self.auto_reconnect = False
         self.reconnect_policy = ReconnectPolicy()
@@ -117,6 +155,7 @@ class MudConnection:
         self._parser = TelnetParser()
         self._remote_enabled.clear()
         self._local_enabled.clear()
+        self._ttype_cycle = 0  # else a reconnect answers the first SEND with the MTTS bits
         ctx: ssl.SSLContext | None = None
         if tls or ssl_context is not None:
             ctx = ssl_context or ssl.create_default_context()
@@ -182,7 +221,7 @@ class MudConnection:
                 self._remote_enabled.add(opt)
                 self._send_command(T.DO, opt)
                 if opt == T.OPT_GMCP:
-                    self._send_gmcp_hello()
+                    self._send_gmcp_handshake()
             elif opt not in _ACCEPT_REMOTE:
                 self._send_command(T.DONT, opt)
         elif cmd == T.DO:
@@ -199,9 +238,16 @@ class MudConnection:
             self._local_enabled.discard(opt)
 
     def _handle_subnegotiation(self, sub: Subnegotiation) -> None:
-        # The server asks for our terminal type; reply with a single TTYPE IS.
+        # The server asks for our terminal type; answer the next step of the MTTS cycle.
         if sub.option == T.OPT_TTYPE and sub.payload[:1] == bytes([_TTYPE_SEND]):
-            self.send_subnegotiation(T.OPT_TTYPE, bytes([_TTYPE_IS]) + TERMINAL_TYPE)
+            self.send_subnegotiation(T.OPT_TTYPE, bytes([_TTYPE_IS]) + self._next_ttype())
+
+    def _next_ttype(self) -> bytes:
+        """The MTTS response for this SEND. Once the cycle is exhausted every further
+        SEND repeats the last entry, which is the standard's end-of-cycle signal."""
+        reply = TTYPE_CYCLE[min(self._ttype_cycle, len(TTYPE_CYCLE) - 1)]
+        self._ttype_cycle += 1
+        return reply
 
     # --- outbound helpers ---
 
@@ -223,9 +269,11 @@ class MudConnection:
         the caller built the full IAC framing itself, e.g. an MSDP REPORT)."""
         self._raw_write(data)
 
-    def _send_gmcp_hello(self) -> None:
+    def _send_gmcp_handshake(self) -> None:
+        hello = json.dumps({"client": CLIENT_NAME, "version": __version__})
+        self.send_subnegotiation(T.OPT_GMCP, b"Core.Hello " + hello.encode())
         self.send_subnegotiation(
-            T.OPT_GMCP, b'Core.Hello {"client":"genericMud","version":"0.1"}'
+            T.OPT_GMCP, b"Core.Supports.Set " + json.dumps(list(GMCP_SUPPORTS)).encode()
         )
 
     def _send_naws(self, columns: int, rows: int) -> None:

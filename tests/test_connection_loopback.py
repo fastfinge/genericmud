@@ -75,7 +75,55 @@ async def test_loopback_handshake_and_mccp():
     assert b"Compressed room\r\n" in app
     assert conn.parser.mccp.active is True
 
-    # The client must have accepted both options and sent its GMCP hello.
+    # The client must have accepted both options and sent its GMCP handshake.
     assert bytes([T.IAC, T.DO, T.OPT_GMCP]) in client_sent
     assert bytes([T.IAC, T.DO, T.OPT_MCCP2]) in client_sent
     assert b"Core.Hello" in client_sent
+    assert b"Core.Supports.Set" in client_sent
+
+
+async def test_ttype_cycle_restarts_on_each_connection():
+    """The MTTS cycle is per-connection state. A MudConnection is reused across
+    reconnects, so resuming mid-cycle would hand the next server the capability
+    bitvector as its terminal type and never identify the client at all."""
+    per_connection: list[bytearray] = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        sent = bytearray()
+        per_connection.append(sent)
+
+        async def drain_client() -> None:
+            try:
+                while True:
+                    chunk = await reader.read(1024)
+                    if not chunk:
+                        break
+                    sent.extend(chunk)
+            except (ConnectionResetError, asyncio.CancelledError):
+                pass
+
+        collector = asyncio.create_task(drain_client())
+        writer.write(bytes([T.IAC, T.DO, T.OPT_TTYPE]))
+        await writer.drain()
+        await asyncio.sleep(0.05)  # let the client answer WILL before we ask
+        writer.write(bytes([T.IAC, T.SB, T.OPT_TTYPE, 1, T.IAC, T.SE]))  # 1 = TTYPE SEND
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        collector.cancel()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+
+    conn = MudConnection()
+    for _ in range(2):
+        await conn.connect("127.0.0.1", port)
+        await _wait_for(lambda: per_connection and b"GENERICMUD" in bytes(per_connection[-1]))
+        await conn.close()
+
+    server.close()
+    await server.wait_closed()
+
+    assert len(per_connection) == 2
+    for sent in per_connection:
+        assert b"GENERICMUD" in bytes(sent), "second connection resumed the cycle mid-way"

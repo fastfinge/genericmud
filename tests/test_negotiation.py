@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from genericmud import __version__
 from genericmud.protocol import telnet as T
-from genericmud.protocol.telnet import Negotiation
-from genericmud.transport.connection import MudConnection
+from genericmud.protocol.telnet import Event, Negotiation, Subnegotiation
+from genericmud.transport.connection import (
+    GMCP_SUPPORTS,
+    MTTS_BITS,
+    MTTS_SCREEN_READER,
+    MudConnection,
+)
 
 
 class _FakeWriter:
@@ -20,7 +26,7 @@ class _FakeWriter:
         return False
 
 
-def _negotiate(*events: Negotiation) -> bytes:
+def _negotiate(*events: Event) -> bytes:
     """Drive the negotiation policy with server-side events; return the client's replies."""
     conn = MudConnection()
     writer = _FakeWriter()
@@ -44,6 +50,39 @@ def test_accepts_the_oob_options():
     )
     for option in (T.OPT_GMCP, T.OPT_MSDP, T.OPT_MSSP):
         assert bytes([T.IAC, T.DO, option]) in sent
+
+
+def test_gmcp_handshake_subscribes_to_packages():
+    # Core.Hello alone subscribes to nothing: spec-compliant servers send no GMCP at all
+    # until Core.Supports.Set arrives, which leaves room tracking and packs with no data.
+    sent = _negotiate(Negotiation(T.WILL, T.OPT_GMCP))
+    assert b"Core.Hello" in sent
+    assert __version__.encode() in sent  # not a frozen "0.1" that misreports the client
+    assert b"Core.Supports.Set" in sent
+    for package in GMCP_SUPPORTS:
+        assert f'"{package}"'.encode() in sent
+
+
+def test_ttype_answers_the_mtts_cycle():
+    conn = MudConnection()
+    writer = _FakeWriter()
+    conn._writer = writer
+    replies = []
+    for _ in range(4):
+        writer.sent.clear()
+        conn._dispatch(Subnegotiation(T.OPT_TTYPE, bytes([1])))
+        replies.append(bytes(writer.sent))
+    assert b"GENERICMUD" in replies[0]
+    assert b"ANSI" in replies[1]
+    assert f"MTTS {MTTS_BITS}".encode() in replies[2]
+    # Repeating the last entry is how MTTS signals the cycle is over.
+    assert replies[3] == replies[2]
+
+
+def test_mtts_declares_a_screen_reader():
+    # The bit MUDs read to suppress ASCII art, maps and progress bars. This client is
+    # always driving a screen reader, so it is never conditional.
+    assert MTTS_BITS & MTTS_SCREEN_READER
 
 
 def test_refuses_mxp_until_it_is_parsed():
