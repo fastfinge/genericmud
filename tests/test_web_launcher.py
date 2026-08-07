@@ -53,6 +53,9 @@ def test_launcher_uses_free_local_ports_and_cleans_up(tmp_path, monkeypatch):
         def send_packet(self, _data):
             pass
 
+        def suppress_reconnect(self):
+            pass
+
         async def close(self):
             calls["connection_closed"] = True
 

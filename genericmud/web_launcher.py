@@ -67,6 +67,7 @@ def run(args) -> None:
                 schedule=loop.call_later,
                 keymap=load_keymap("vipmud"),
                 diag=make_diagnostic_log(),
+                suppress_reconnect=connection.suppress_reconnect,
             )
             holder["app"] = app
             connection._on_event = app.on_telnet_event

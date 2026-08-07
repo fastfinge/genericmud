@@ -288,6 +288,7 @@ class SessionPanel(wx.Panel):
             credentials=self._credentials,
             hub=self._hub,
             diag=self._diag,
+            suppress_reconnect=self._connection.suppress_reconnect,
         )
         # Seed the persisted speech toggles; changes flow back out through pref_sink.
         self.app.follow_mode = self._prefs.follow_mode

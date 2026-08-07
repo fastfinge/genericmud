@@ -125,6 +125,7 @@ class MudConnection:
         # Quit commands seen on this connection suppress reconnect on the close that follows.
         self.quit_commands = set(DEFAULT_QUIT_COMMANDS)
         self._quit_sent_at: float | None = None  # monotonic time of the last quit command
+        self._server_closing = False  # the server announced a deliberate close (see below)
         self._target: tuple[str, int, bool, ssl.SSLContext | None] | None = None
         self._dispatch_fault_seen = False  # speak the first consumer fault, then stay quiet
 
@@ -146,6 +147,7 @@ class MudConnection:
     ) -> None:
         self._closing = False
         self._quit_sent_at = None  # a prior session's quit must not suppress this one's drops
+        self._server_closing = False
         self._target = (host, port, tls, ssl_context)
         # A reconnect reuses this object, so every connection must start from clean protocol
         # state. Otherwise the previous link's MCCP (zlib) stream stays "active" and the new
@@ -261,8 +263,7 @@ class MudConnection:
 
     def send_subnegotiation(self, option: int, payload: bytes) -> None:
         """Send ``IAC SB <option> <payload> IAC SE`` with payload IAC-escaped."""
-        escaped = payload.replace(bytes([T.IAC]), bytes([T.IAC, T.IAC]))
-        self._raw_write(bytes([T.IAC, T.SB, option]) + escaped + bytes([T.IAC, T.SE]))
+        self._raw_write(T.subnegotiation(option, payload))
 
     def send_packet(self, data: bytes) -> None:
         """Send a pre-framed telnet packet verbatim (MUSHclient ``SendPkt`` semantics:
@@ -300,8 +301,15 @@ class MudConnection:
         self._writer = None
         self._reader = None
 
+    def suppress_reconnect(self) -> None:
+        """The server announced it is closing this link on purpose (GMCP ``Core.Goodbye``:
+        a kick, a ban, a shutdown, a duplicate login). The drop that follows is
+        indistinguishable from a network failure, so without this the backoff loop
+        reconnects straight into whatever just rejected us."""
+        self._server_closing = True
+
     def _should_reconnect(self) -> bool:
-        if not self.auto_reconnect or self._closing:
+        if not self.auto_reconnect or self._closing or self._server_closing:
             return False
         if self._quit_sent_at is not None:
             return time.monotonic() - self._quit_sent_at > _QUIT_GRACE_SECONDS
