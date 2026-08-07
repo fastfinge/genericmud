@@ -74,6 +74,45 @@ def test_msdp_room_reports_build_the_graph_too():
     assert (room.name, room.area, room.exits) == ("The Dock", "Seaside", {"n": "7011"})
 
 
+def test_a_server_that_reports_no_real_room_id_is_refused_not_mismapped():
+    """Captured live from EmpireMUD 2.0 beta 5 (KaVir protocol snippet) over MSDP.
+
+    It reports every map tile as VNUM 0 with an empty EXITS table, because its world is a
+    coordinate grid rather than numbered rooms with discrete exits (and its COORDS come
+    through as 0,0,0 as well). Accepting VNUM 0 as an identity would fuse the entire game
+    into a single node whose name is whatever was seen last, and route the player from a
+    room they are not in. Declining to map it is the correct outcome.
+    """
+    app, backend, _sent, _scheduled = _app()
+    tower = (
+        b"\x01ROOM\x02\x03\x01VNUM\x020\x01NAME\x02A Tower of Souls"
+        b"\x01AREA\x02Tutorial Quests\x01COORDS\x02\x03\x01X\x020\x01Y\x020\x01Z\x020\x04"
+        b"\x01TERRAIN\x02Tower of Souls\x01EXITS\x02\x03\x04\x04"
+    )
+    forest = (
+        b"\x01ROOM\x02\x03\x01VNUM\x020"
+        b"\x01NAME\x02An Overgrown Forest on the Newbie Island"
+        b"\x01AREA\x02Newhaven\x01COORDS\x02\x03\x01X\x020\x01Y\x020\x01Z\x020\x04"
+        b"\x01TERRAIN\x02Overgrown Forest\x01EXITS\x02\x03\x04\x04"
+    )
+    for payload in (tower, forest, tower):
+        app.on_telnet_event(Subnegotiation(OPT_MSDP, payload))
+    assert app.map.rooms == {}
+    assert app.map.here == ""
+
+    # The payload still reaches the rest of the client: "where am I" reads the MUD's own
+    # room details even though the room can't be placed on a map.
+    app.on_ws_message({"type": "key", "key": "alt+w"})
+    assert "A Tower of Souls" in _spoken(backend)
+
+    backend.spoken.clear()
+    app.on_ws_message({"type": "key", "key": "alt+m"})
+    assert "this room is not on the map" in _spoken(backend)
+    backend.spoken.clear()
+    app.on_ws_message({"type": "input", "text": "/goto forest"})
+    assert "no map yet" in _spoken(backend)
+
+
 def test_alt_m_reads_the_room_and_its_exits():
     app, backend, _sent, _scheduled = _app()
     _room(app, 3001, "Temple Square", {"n": 3002, "e": 3005})
