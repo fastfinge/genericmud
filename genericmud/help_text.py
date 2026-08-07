@@ -40,6 +40,13 @@ diagonals, 5 or 0 look, period scans, minus up, plus down (turn this off in
 the View menu if NVDA needs your numpad). Type .3n2e to speedwalk. Alt+B
 drops a breadcrumb and Alt+R walks you back to it.
 
+Mapping:
+On MUDs that tell the client which room you're in, genericMud draws a map as
+you explore. Alt+M reads the room out with where each exit leads and which
+exits you haven't been through yet. Type /goto followed by a room name to walk
+there, /label followed by a name to name the room you're in, and /map to hear
+how much you've mapped.
+
 Automation and sounds:
 Ctrl+B opens the Automation Manager. Its Show box contains Triggers, Aliases,
 Hotkeys, Channels, and Scripts. A trigger watches text from the MUD. An alias
@@ -233,6 +240,12 @@ Alt+B             Drop a breadcrumb
 Alt+R             Retrace back to the breadcrumb
 Alt+W             Where am I (GMCP MUDs)
 Alt+S             Stop walking
+
+Mapping (MUDs that report rooms over GMCP or MSDP):
+Alt+M             Read this room and where its exits lead
+/goto <room>      Walk to a room you've mapped
+/label <name>     Name the room you're in
+/map              How much of this world you've mapped
 
 Tools:
 Ctrl+P            Manage soundpacks

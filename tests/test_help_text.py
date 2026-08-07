@@ -29,6 +29,7 @@ def test_shortcuts_page_mentions_every_keymap_namespace_key():
         "review:": "Review line by line",
         "chan:": "channel",
         "nav:": "breadcrumb",
+        "map:": "Walk to a room you've mapped",
         "voice:follow_mode": "Follow mode",
         "voice:interrupt_mode": "Interrupt mode",
         "input:autoretype": "autoretype",

@@ -23,6 +23,7 @@ from genericmud.bridge import protocol
 from genericmud.completion import OutputWordIndex
 from genericmud.config.atomic import atomic_write_text
 from genericmud.config.worlds import config_dir
+from genericmud.mapping import RoomMap, load_map, save_map
 from genericmud.model.buffer import Buffer, Line
 from genericmud.navigation import Navigator, SafeWalk, expand_speedwalk
 from genericmud.packs import ActivationResult, PackStore, activate_world, user_rules
@@ -52,6 +53,9 @@ SPEEDWALK_PREFIX = "."  # ".3n2e" expands to n,n,n,e,e (leading char disambiguat
 SAFE_PREFIX = ".."  # "..3n2e" walks the same route one step at a time, halting if blocked
 CLIENT_PREFIX = "/"  # "/alias", "/trigger", ... ; unknown /verbs pass through to the MUD
 MAX_ALIAS_DEPTH = 20  # guard against an alias/trigger that re-fires itself forever
+# New rooms learned before the map is written again. Exploring is exactly when a session
+# is long and a crash is most costly, and a write every twenty-five rooms is nothing.
+_MAP_SAVE_INTERVAL = 25
 _PLUGIN_TICK_SECONDS = 0.25  # OnPluginTick cadence (MUSHclient ticks faster; see _arm_plugin_ticks)
 _PROMPT_IDLE_FLUSH_SECONDS = 0.25  # emit a newline-less prompt if the server sends no more data
 # MSDP variables that mean the player's location changed; both the table and flat forms.
@@ -213,6 +217,7 @@ class EngineApp:
         sound_backend: SoundBackend | None = None,
         name: str = "",
         log_dir: Path | None = None,
+        map_dir: Path | None = None,
         credentials: CredentialStore | None = None,
         hub: SessionHub | None = None,
         diag: DiagnosticLog | None = None,
@@ -264,6 +269,11 @@ class EngineApp:
         self.channels.set_policy("system", ChannelPolicy(interrupt=True))
         self.keymap = keymap or {}
         self.nav = Navigator()  # breadcrumb trail + GMCP room for speedwalk/where-am-I
+        # Room graph, on MUDs that report rooms over GMCP/MSDP. Loaded per world in
+        # on_connect; empty (and inert) on MUDs that share nothing.
+        self.map = RoomMap()
+        self.map_dir = Path(map_dir) if map_dir else config_dir() / "maps"
+        self._map_unsaved = 0  # new rooms learned since the last write
         self.command_separator = ";"  # stacked input ("n;n;look"); set "" to disable
         self.name = name  # session label, used for the log filename
         self.log_dir = Path(log_dir) if log_dir else config_dir() / "logs"
@@ -317,6 +327,7 @@ class EngineApp:
         # settings (volumes, toggles) across sessions -- with nothing seeded, every
         # launch silently reset them to defaults.
         self._restore_pack_vars()
+        self._load_map()  # this world's room graph, if one has been built before
         self.reload_user_rules()  # field-based automation loads alongside installed packs
         self.reload_user_scripts()
         result = self.activate_packs(world)
@@ -427,6 +438,7 @@ class EngineApp:
         self._closed = True  # ends the OnPluginTick chain
         self.engine.cancel_timers()  # cancel pending pack timers so none fire post-close
         self._persist_pack_vars()
+        self._save_map()
         if self.hub is not None and self.name:
             self.hub.unregister(self.name, self._dispatch_remote)
         if self.logger is not None:
@@ -510,6 +522,28 @@ class EngineApp:
         return True
 
     # --- pack-variable persistence (MUSHclient SaveState equivalent) ---
+
+    # --- room map ---
+
+    def _map_path(self) -> Path | None:
+        """This world's map file, or None for a session with no name to file it under."""
+        if not self.name:
+            return None
+        return self.map_dir / f"{sanitize_component(self.name)}.json"
+
+    def _load_map(self) -> None:
+        path = self._map_path()
+        if path is None:
+            return
+        self.map = load_map(path)
+        self._map_unsaved = 0
+
+    def _save_map(self) -> None:
+        path = self._map_path()
+        if path is None or not self.map.rooms:
+            return
+        if save_map(self.map, path):
+            self._map_unsaved = 0
 
     def _pack_vars_path(self) -> Path | None:
         if self.packs is None or not self.name:
@@ -736,6 +770,8 @@ class EngineApp:
                             pack.dispatch_gmcp(message.name, message.value)
                         if message.name.lower() == "core.goodbye":
                             self._server_goodbye(message.value)
+                        elif message.name.lower() == "room.wrongdir":
+                            self._wrong_direction(message.value)
                     elif message.name == msdp.REPORTABLE_VARIABLES:
                         self._subscribe_msdp(message.value)
                     elif message.name in _MSDP_ROOM_VARS:
@@ -805,6 +841,20 @@ class EngineApp:
         self.voice.speak(spoken, channel="system", interrupt=True)
         self._post(protocol.echo(f"* {spoken}"))
 
+    def _wrong_direction(self, direction: object) -> None:
+        """GMCP ``room.wrongdir``: the MUD says that exit doesn't exist. Stop walking.
+
+        Authoritative where the blocked-movement line patterns are an English guess, so a
+        route built from a stale edge halts here instead of firing its remaining steps.
+        The exit is deliberately NOT removed from the map: a closed door and a door that
+        was never there look identical from here, and dropping a real exit loses a route.
+        """
+        if self._walk is None or not self._walk.active:
+            return
+        self._walk.cancel()
+        name = str(direction).strip() if direction else ""
+        self._speak_system(f"no exit {name}, walk stopped" if name else "walk stopped, no exit")
+
     @staticmethod
     def _is_room_info(message: OobMessage) -> bool:
         return (
@@ -816,6 +866,12 @@ class EngineApp:
     def _update_room(self, room: dict) -> None:
         changed = room != self.nav.room
         self.nav.update_room(room)
+        known = len(self.map.rooms)
+        self.map.observe(room)
+        if len(self.map.rooms) > known:
+            self._map_unsaved += 1
+            if self._map_unsaved >= _MAP_SAVE_INTERVAL:
+                self._save_map()  # a crash mustn't cost a whole session's exploring
         if changed:
             self._on_player_moved()  # follow mode: the new room barges over the old one
         if changed and self._walk is not None and self._walk.active:
@@ -930,7 +986,12 @@ class EngineApp:
         steps = expand_speedwalk(text[len(SAFE_PREFIX) :])
         if not steps:
             return False
-        self._cancel_walk()  # a new walk supersedes the old; don't leave both sets of timers firing
+        self._start_safe_walk(steps)
+        return True
+
+    def _start_safe_walk(self, steps: list[str], announcement: str = "") -> None:
+        """Begin a step-at-a-time walk, superseding any walk already running."""
+        self._cancel_walk()  # don't leave both walks' timers firing into each other
 
         def send_and_record(direction: str) -> None:
             self._send(direction)
@@ -940,8 +1001,9 @@ class EngineApp:
         self._walk = SafeWalk(
             steps, send=send_and_record, schedule=self._schedule, announce=self._speak_system
         )
+        if announcement:
+            self._speak_system(announcement)
         self._walk.start()
-        return True
 
     def _cancel_walk(self) -> None:
         if self._walk is not None and self._walk.active:
@@ -981,9 +1043,59 @@ class EngineApp:
             self._list_user_rules("trigger")
         elif verb == "to":
             self._send_to_session(rest)
+        elif verb == "goto":
+            self._goto(rest)
+        elif verb == "label":
+            self._label_room(rest)
+        elif verb == "map":
+            self._speak_system(self.map.summary())
         else:
             return False  # unknown /verb -> let the MUD have it (some use slash commands)
         return True
+
+    # --- room map ---
+
+    def _goto(self, query: str) -> None:
+        """Walk to a mapped room named by ``query``, step by step so it can halt."""
+        if not query:
+            self._speak_system("usage: /goto <room name>")
+            return
+        if not self.map.rooms:
+            self._speak_system("no map yet; this MUD may not tell the client where you are")
+            return
+        if not self.map.here:
+            self._speak_system("this room is not on the map, so there is nowhere to walk from")
+            return
+        matches = self.map.search(query)
+        if not matches:
+            self._speak_system(f"no mapped room matches {query}")
+            return
+        for room in matches:
+            path = self.map.path_to(room.id)
+            if path is None:
+                continue
+            target = room.label or room.name
+            if not path:
+                self._speak_system(f"you are already at {target}")
+                return
+            # Through SafeWalk, not a burst: it halts on a blocked exit, and a route
+            # assembled from remembered rooms is exactly where a stale edge shows up.
+            self._start_safe_walk(path, f"walking to {target}, {len(path)} steps")
+            return
+        # Every match is somewhere the map knows of but can't currently reach.
+        found = matches[0].label or matches[0].name
+        self._speak_system(f"{found} is on the map but no known route leads there from here")
+
+    def _label_room(self, text: str) -> None:
+        """Name the current room so /goto can find it later."""
+        if not text:
+            self._speak_system("usage: /label <name for this room>")
+            return
+        if not self.map.set_label(text):
+            self._speak_system("this room is not on the map, so it cannot be labelled")
+            return
+        self._save_map()  # a label is deliberate work; don't risk losing it to a crash
+        self._speak_system(f"this room is now {text}")
 
     def _user_rules(self, kind: str) -> dict[str, str]:
         return self._user_aliases if kind == "alias" else self._user_triggers
@@ -1081,6 +1193,8 @@ class EngineApp:
             self.sound.flush()  # panic key: cut all playing audio (Shift+F11)
         elif namespace == "nav":
             self._handle_nav(argument)
+        elif namespace == "map" and argument == "where":
+            self._speak_system(self.map.describe())
         elif namespace == "log" and argument == "toggle":
             self._toggle_log()
         elif namespace == "diag" and argument == "where":

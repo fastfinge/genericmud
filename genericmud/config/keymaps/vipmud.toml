@@ -69,6 +69,10 @@
 "alt+r" = "nav:retrace"
 "alt+w" = "nav:where"
 "alt+s" = "nav:stop"  # halt an in-progress safe-walk ("..3n2e")
+# alt+m reads the mapped room: its name and where each exit leads, including which
+# exits lead somewhere you haven't been. Only MUDs that report rooms over GMCP/MSDP
+# build a map; "/goto <room>" walks to one, "/label <name>" names the room you're in.
+"alt+m" = "map:where"
 
 # Logging: toggle writing this session's output + sent commands to a timestamped
 # file under ~/.genericmud/logs.
