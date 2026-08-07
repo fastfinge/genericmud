@@ -26,6 +26,7 @@ from genericmud.config.worlds import config_dir
 from genericmud.model.buffer import Buffer, Line
 from genericmud.navigation import Navigator, SafeWalk, expand_speedwalk
 from genericmud.packs import ActivationResult, PackStore, activate_world, user_rules
+from genericmud.protocol import msdp
 from genericmud.protocol import telnet as T
 from genericmud.protocol.msp import parse_msp_line
 from genericmud.protocol.oob import OobMessage, ServerStatus, from_subnegotiation
@@ -53,6 +54,10 @@ CLIENT_PREFIX = "/"  # "/alias", "/trigger", ... ; unknown /verbs pass through t
 MAX_ALIAS_DEPTH = 20  # guard against an alias/trigger that re-fires itself forever
 _PLUGIN_TICK_SECONDS = 0.25  # OnPluginTick cadence (MUSHclient ticks faster; see _arm_plugin_ticks)
 _PROMPT_IDLE_FLUSH_SECONDS = 0.25  # emit a newline-less prompt if the server sends no more data
+# MSDP variables that mean the player's location changed; both the table and flat forms.
+_MSDP_ROOM_VARS = frozenset(
+    {"ROOM", "ROOM_NAME", "ROOM_AREA", "ROOM_EXITS", "ROOM_VNUM", "AREA_NAME"}
+)
 # CP1252 readings of the C1 range (0x80-0x9F): Windows MUDs advertising "Latin-1" almost
 # universally send CP1252, whose curly quotes/dashes live here. Decoding them as Latin-1
 # yields invisible C1 controls a screen reader garbles ("it\x92s"), and any trigger written
@@ -211,12 +216,15 @@ class EngineApp:
         credentials: CredentialStore | None = None,
         hub: SessionHub | None = None,
         diag: DiagnosticLog | None = None,
+        suppress_reconnect: Callable[[], None] | None = None,
     ) -> None:
         self.buffer = Buffer()
         self.voice = voice
         self.packs = packs
         self._send = send or (lambda _text: None)
         self._post = post or (lambda _message: None)
+        # Wired by the UI to the transport; the engine only knows the server said goodbye.
+        self._suppress_reconnect = suppress_reconnect or (lambda: None)
         self._schedule = schedule or _default_schedule
         self._diag = diag
         # Native (wx) injects a pygame backend; otherwise sounds post to the renderer (which
@@ -381,16 +389,38 @@ class EngineApp:
         self._schedule(_PLUGIN_TICK_SECONDS, tick)
 
     def _dispatch_msdp_start(self) -> None:
-        """Tell packs MSDP is on (the transport already answered DO). The SENT_DO round
-        is where an MSDP soundpack sends its REPORT list; Erion's server streams
-        nothing (so no combat/ambience cues exist) until those REPORTs arrive."""
-        if not self._mush_packs:
-            return
+        """Open the MSDP tap (the transport already answered DO).
+
+        Two subscribers, and both have to ask or the server stays silent. An MSDP soundpack
+        sends its own REPORT list on the SENT_DO round -- Erion's server streams nothing
+        until those arrive. The client itself asks too, or a MUD that speaks MSDP instead of
+        GMCP leaves every ${mud:...} reference, gauge and room lookup empty with no error.
+        """
         if self._diag is not None:
             self._diag.event("msdp.start", packs=len(self._mush_packs))
+        self._send_msdp(msdp.CMD_LIST, msdp.REPORTABLE_VARIABLES)
         for pack in self._mush_packs:
             pack.dispatch_telnet_request(T.OPT_MSDP, "WILL")
             pack.dispatch_telnet_request(T.OPT_MSDP, "SENT_DO")
+
+    def _send_msdp(self, command: str, value: str) -> None:
+        self.sink.send_packet(T.subnegotiation(T.OPT_MSDP, msdp.encode_msdp(command, value)))
+
+    def _subscribe_msdp(self, reportable: object) -> None:
+        """REPORT the variables we can use that this server actually advertises.
+
+        Asking for a variable a server doesn't have gets an error line on some codebases and
+        is ignored on others, so intersect rather than guess. Ordered by our list, not the
+        server's, so the request is stable across sessions.
+        """
+        if not isinstance(reportable, list):
+            return  # a scalar or table here is a non-conforming server; nothing safe to ask for
+        available = {str(name) for name in reportable}
+        wanted = [name for name in msdp.STANDARD_REPORTS if name in available]
+        if self._diag is not None:
+            self._diag.event("msdp.subscribe", offered=len(available), wanted=len(wanted))
+        for name in wanted:
+            self._send_msdp(msdp.CMD_REPORT, name)
 
     def shutdown(self) -> None:
         """Release session resources on close: leave the hub and stop logging."""
@@ -695,6 +725,7 @@ class EngineApp:
     def _handle_subnegotiation(self, sub: T.Subnegotiation) -> None:
         result = from_subnegotiation(sub.option, sub.payload)
         if isinstance(result, list):
+            msdp_room_changed = False
             for message in result:
                 if isinstance(message, OobMessage):
                     self._gauges[message.name] = message.value
@@ -703,8 +734,18 @@ class EngineApp:
                     if message.source == "gmcp":
                         for pack in self._mush_packs:
                             pack.dispatch_gmcp(message.name, message.value)
+                        if message.name.lower() == "core.goodbye":
+                            self._server_goodbye(message.value)
+                    elif message.name == msdp.REPORTABLE_VARIABLES:
+                        self._subscribe_msdp(message.value)
+                    elif message.name in _MSDP_ROOM_VARS:
+                        msdp_room_changed = True
                     if self._is_room_info(message):
                         self._update_room(message.value)
+            # Once per packet, not once per variable: a server reports every changed variable
+            # together, so updating per message would announce one move several times over.
+            if msdp_room_changed and (room := self._msdp_room()):
+                self._update_room(room)
             if result:
                 self._post(protocol.status(self._gauges))
         elif isinstance(result, ServerStatus):
@@ -729,6 +770,40 @@ class EngineApp:
             )
         for pack in self._mush_packs:
             pack.dispatch_telnet_subnegotiation(T.OPT_MSDP, payload)
+
+    def _msdp_room(self) -> dict:
+        """The navigator's room shape from MSDP's variables, or ``{}`` if none are set.
+
+        Servers report either a ``ROOM`` table or flat ``ROOM_*`` variables, and MSDP names
+        are uppercase, so neither form reaches ``Navigator.where()`` untranslated. VNUM is
+        carried because two rooms can share a name and it's what makes a move detectable.
+        """
+        table = self._gauges.get("ROOM")
+        if not isinstance(table, dict):
+            table = {}
+        room = {
+            "name": table.get("NAME") or self._gauges.get("ROOM_NAME"),
+            "area": (
+                table.get("AREA") or self._gauges.get("ROOM_AREA")
+                or self._gauges.get("AREA_NAME")
+            ),
+            "exits": table.get("EXITS") or self._gauges.get("ROOM_EXITS"),
+            "vnum": table.get("VNUM") or self._gauges.get("ROOM_VNUM"),
+        }
+        return {key: value for key, value in room.items() if value}
+
+    def _server_goodbye(self, reason: object) -> None:
+        """GMCP ``Core.Goodbye``: the server is closing this link deliberately, and the body
+        says why (kicked, banned, shutting down, logged in elsewhere). Suppress first: the
+        drop can arrive before the speech does, and reconnecting into a ban helps nobody."""
+        text = reason.strip() if isinstance(reason, str) else ""
+        closed = "The MUD closed the connection"
+        spoken = f"{closed}: {text}" if text else f"{closed}."
+        if self._diag is not None:
+            self._diag.event("gmcp.goodbye", reason=text)
+        self._suppress_reconnect()
+        self.voice.speak(spoken, channel="system", interrupt=True)
+        self._post(protocol.echo(f"* {spoken}"))
 
     @staticmethod
     def _is_room_info(message: OobMessage) -> bool:
@@ -1105,6 +1180,9 @@ class EngineApp:
             # the legacy-encoding latch, or a drop mid-character mis-decodes the whole reconnect.
             self._decode_pending = b""
             self._server_latin1 = False
+            # Echo state belongs to the dead socket. Left armed, every command for the rest
+            # of the session logs as "***" because the new server never sends WONT ECHO.
+            self._input_masked = False
             # A fresh socket means fresh login prompts; the old AutoLogin is marked done, so
             # re-arm it or a reconnect strands the user at the login screen.
             self.begin_login(self.name)

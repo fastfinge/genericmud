@@ -8,8 +8,10 @@ from genericmud.protocol.telnet import (
     GA,
     OPT_GMCP,
     OPT_MSDP,
+    WILL,
     Command,
     DataReceived,
+    Negotiation,
     Subnegotiation,
 )
 from genericmud.voice.router import VoiceRouter
@@ -160,6 +162,71 @@ def test_msp_line_emits_sound_and_strips_tag():
     assert abs(sounds[0]["gain"] - 0.8) < 1e-9
     # the !!SOUND tag is stripped from what gets spoken/displayed
     assert any("A thud" in s and "!!SOUND" not in s for s in backend.spoken)
+
+
+def _msdp(pairs: dict[str, str]) -> bytes:
+    """An MSDP subnegotiation payload of flat VAR/VAL pairs."""
+    out = bytearray()
+    for name, value in pairs.items():
+        out += bytes([1]) + name.encode() + bytes([2]) + value.encode()
+    return bytes(out)
+
+
+def test_msdp_subscribes_to_the_variables_the_server_offers():
+    raw: list[bytes] = []
+    voice = VoiceRouter(RecordingBackend(), clock=lambda: 0.0)
+    app = EngineApp(voice, post=lambda _m: None, send_raw=raw.append)
+
+    app.on_telnet_event(Negotiation(WILL, OPT_MSDP))
+    assert raw == [b"\xff\xfaE\x01LIST\x02REPORTABLE_VARIABLES\xff\xf0"]
+
+    # The server answers with what it actually has; we REPORT the intersection, and only
+    # the intersection -- asking for a variable the server never advertised is noise at best.
+    raw.clear()
+    payload = bytes([1]) + b"REPORTABLE_VARIABLES" + bytes([2, 5])
+    for name in ("HEALTH", "ROOM_NAME", "SOMETHING_EXOTIC"):
+        payload += bytes([2]) + name.encode()
+    payload += bytes([6])
+    app.on_telnet_event(Subnegotiation(OPT_MSDP, payload))
+    requested = [line.split(b"\x02")[1].rstrip(b"\xff\xf0") for line in raw]
+    assert requested == [b"HEALTH", b"ROOM_NAME"]
+    assert all(b"REPORT" in line for line in raw)
+
+
+def test_msdp_room_variables_drive_navigation():
+    app, _backend, _sent, _posted = _app()
+    app.on_telnet_event(
+        Subnegotiation(OPT_MSDP, _msdp({"ROOM_NAME": "The Bridge", "AREA_NAME": "Ship"}))
+    )
+    # Navigator.where() reads lowercase name/area, so the MSDP names have to be translated
+    # or a MUD that speaks MSDP instead of GMCP answers "where am I" with nothing.
+    assert app.nav.room.get("name") == "The Bridge"
+    assert "The Bridge" in app.nav.where()
+
+
+def test_msdp_room_update_announces_one_move_per_packet():
+    app, _backend, _sent, _posted = _app()
+    moves = []
+    app._on_player_moved = lambda: moves.append(1)
+    app.on_telnet_event(
+        Subnegotiation(
+            OPT_MSDP,
+            _msdp({"ROOM_NAME": "Cargo Hold", "ROOM_VNUM": "42", "AREA_NAME": "Ship"}),
+        )
+    )
+    assert len(moves) == 1  # not one per changed variable
+
+
+def test_gmcp_goodbye_speaks_the_reason_and_stops_reconnecting():
+    suppressed = []
+    backend = RecordingBackend()
+    voice = VoiceRouter(backend, clock=lambda: 0.0)
+    app = EngineApp(
+        voice, post=lambda _m: None, suppress_reconnect=lambda: suppressed.append(True)
+    )
+    app.on_telnet_event(Subnegotiation(OPT_GMCP, b'Core.Goodbye "Banned: ask the admins."'))
+    assert suppressed == [True]  # a deliberate kick must not be retried on backoff
+    assert any("Banned" in spoken for spoken in backend.spoken)
 
 
 def test_msp_off_stops_the_music_it_started():

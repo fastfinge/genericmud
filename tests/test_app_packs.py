@@ -144,7 +144,12 @@ def test_msdp_negotiation_flows_to_mushclient_pack(tmp_path):
     assert app.engine.get_var("installed") == "1"  # OnPluginInstall dispatched
 
     app.on_telnet_event(Negotiation(WILL, OPT_MSDP))
-    assert raw == [bytes([255, 250, 69, 1]) + b"REPORT" + bytes([255, 240])]
+    # Both subscribers ask, in order: the client's own LIST first, then the pack's REPORT.
+    assert raw == [
+        bytes([255, 250, 69, 1]) + b"LIST" + bytes([2]) + b"REPORTABLE_VARIABLES"
+        + bytes([255, 240]),
+        bytes([255, 250, 69, 1]) + b"REPORT" + bytes([255, 240]),
+    ]
 
     payload = bytes([1]) + b"SOUND" + bytes([2]) + b"hit"
     app.on_telnet_event(Subnegotiation(OPT_MSDP, payload))

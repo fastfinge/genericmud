@@ -50,6 +50,13 @@ OPT_MXP = 91  # Mud eXtension Protocol
 OPT_GMCP = 201  # Generic Mud Communication Protocol
 
 
+def subnegotiation(option: int, payload: bytes) -> bytes:
+    """Frame ``IAC SB <option> <payload> IAC SE`` with the payload IAC-escaped."""
+    return bytes([IAC, SB, option]) + payload.replace(bytes([IAC]), bytes([IAC, IAC])) + bytes(
+        [IAC, SE]
+    )
+
+
 @dataclass(frozen=True)
 class DataReceived:
     """A run of application bytes (ANSI intact; line-splitting happens above)."""

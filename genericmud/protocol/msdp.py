@@ -32,6 +32,49 @@ _CONTROL = bytes(
     [MSDP_VAR, MSDP_VAL, MSDP_TABLE_OPEN, MSDP_TABLE_CLOSE, MSDP_ARRAY_OPEN, MSDP_ARRAY_CLOSE]
 )
 
+# Client-to-server commands. A server sends nothing until it is asked: LIST discovers what
+# this server actually supports, REPORT subscribes to changes in a variable.
+CMD_LIST = "LIST"
+CMD_REPORT = "REPORT"
+REPORTABLE_VARIABLES = "REPORTABLE_VARIABLES"
+
+# Variables worth subscribing to when the server advertises them. MSDP variable names are
+# server-defined; these are the ones the standard names and real servers share, covering
+# vitals (so script and command-variable references resolve) and location (so "where am I"
+# and adaptive safe-walk work on a MUD that speaks MSDP but not GMCP). Deliberately short:
+# every reported variable is a packet on every change, and some servers advertise hundreds.
+STANDARD_REPORTS = (
+    "AREA_NAME",
+    "CHARACTER_NAME",
+    "EXPERIENCE",
+    "HEALTH",
+    "HEALTH_MAX",
+    "LEVEL",
+    "MANA",
+    "MANA_MAX",
+    "MOVEMENT",
+    "MOVEMENT_MAX",
+    "OPPONENT_HEALTH",
+    "OPPONENT_NAME",
+    "ROOM",
+    "ROOM_AREA",
+    "ROOM_EXITS",
+    "ROOM_NAME",
+    "ROOM_VNUM",
+)
+
+
+def encode_msdp(command: str, value: str) -> bytes:
+    """Build one ``MSDP_VAR <command> MSDP_VAL <value>`` payload.
+
+    One pair per subnegotiation on purpose: the grammar allows repeating the pair, but a
+    server that parses a payload into a dict keeps only the last value and silently drops
+    the rest of the subscription.
+    """
+    return (
+        bytes([MSDP_VAR]) + command.encode("ascii") + bytes([MSDP_VAL]) + value.encode("ascii")
+    )
+
 
 def parse_msdp(payload: bytes) -> dict[str, Any]:
     return _MsdpParser(payload).parse_table_body(top=True)
