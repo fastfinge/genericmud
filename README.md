@@ -105,6 +105,81 @@ main output.
 - Typing `sh goblin` when you made an alias `sh *` → `shoot %1`? That's in
   the Automation Manager, next section.
 
+The rest of this section is the detail: how to write a route, how the two kinds
+of walk differ, and what the breadcrumb trail can and can't take you back
+through. Other clients call some of this fastwalk.
+
+### Writing a route
+
+A route is a run of directions, each with an optional count in front of it.
+`3n` is three north; `n` on its own is once. The directions are `n`, `s`, `e`,
+`w`, `ne`, `nw`, `se`, `sw`, `u` for up and `d` for down. Case doesn't matter
+and there are no spaces or separators, so `.2se4n` is a valid route.
+
+Anything else in the run means it isn't a route at all, and genericMud sends the
+line to the MUD as an ordinary command instead. `.3north` and `.n,n,e` go to the
+game as text, and so does a zero count like `.3n0e` — a leg you count zero times
+is a typo, not one you meant to skip. Routes are capped at 1000 steps, so a
+slipped keypress like `.999999999n` is refused rather than flooding the MUD.
+
+A route understands compass directions only. Exits your MUD spells out in words
+— `enter portal`, `out`, `climb rope` — aren't part of one. Type those yourself.
+
+### `.` walks it now, `..` walks it carefully
+
+`.3n2e` sends all five moves at once, as fast as the connection carries them.
+It's the quick one, and it's the right choice on a route you know is clear.
+
+`..3n2e` sends one move, waits until you've actually arrived, and then sends the
+next. On a MUD that tells the client which room you're in (over GMCP or MSDP)
+that wait is exact. On a MUD that doesn't, it waits about half a second per step
+and carries on, which is slower but still lands you in the right place on a
+laggy link.
+
+Either way, if the MUD answers a step with something like "You can't go that
+way", "There is no exit" or "The door is closed", the walk gives up there and
+says "path blocked, 4 steps abandoned" rather than firing the rest of the route
+into a wall. It says "arrived" when it finishes. **Alt+S** stops it early, and
+starting another walk cancels one already in progress.
+
+**Alt+S** only has something to stop during a `..` walk. A `.` route and a
+retrace are already on their way to the MUD by the time you could press it.
+
+### The breadcrumb trail
+
+genericMud keeps a record of the compass moves you make — pressed on the
+numpad, typed short as `n` or `se`, or sent by either kind of walk. That record
+is the trail, and **Alt+R** turns it into the way home: the same steps in
+reverse, each one flipped to its opposite.
+
+**Alt+B** drops a breadcrumb, which means "start measuring from here". It
+forgets the trail so far and begins a new one in your current room, so press it
+in the spot you want to be able to come back to.
+
+Retracing leaves your detours out. Go north, then east and straight back west,
+and the east and west cancel each other out, so **Alt+R** just sends south.
+That folds as deep as it needs to: three rooms up a dead end and back again adds
+nothing to the way home.
+
+**Alt+R** sends the whole way back in one burst, the way `.` does, and then
+forgets the trail on the assumption you made it. It won't stop partway if a door
+has closed behind you, so on a route that might have changed, listen to the
+output as it goes and drop a fresh breadcrumb once you're somewhere known.
+
+Two things don't make it into the trail, because genericMud never sees a
+direction for them. One is any move that isn't a compass direction: `enter
+portal`, a teleport, a mount that carries you off, or an exit your MUD names in
+words. The other is a direction typed out in full — `north` sends and works, but
+only the short `n` records a step. After either, the way back isn't in the
+trail, so drop a new breadcrumb with **Alt+B**.
+
+### Where am I
+
+**Alt+W** speaks the room name, the area, the exits, and how many steps you are
+from your breadcrumb. The room details come from the MUD over GMCP or MSDP, so
+on a MUD that shares nothing you'll hear "no location info" — the step count
+still works, because that's genericMud's own count of your moves.
+
 ## Automation: triggers, aliases, hotkeys, channels, and scripts
 
 **Ctrl+B** opens one Automation Manager for the current world. Choose

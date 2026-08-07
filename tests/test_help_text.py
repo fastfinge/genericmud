@@ -68,6 +68,22 @@ def test_plain_language_scripting_guide_is_linked_and_covers_the_public_surface(
         assert topic in guide
 
 
+def test_readme_documents_what_walking_actually_does():
+    # The walking keys shipped long before any explanation of them did. Pin the
+    # behaviours a player has to know but can't discover: the two walk prefixes,
+    # the halt, and what the breadcrumb trail misses.
+    readme = README.read_text(encoding="utf-8")
+    for topic in (
+        "### Writing a route",
+        "### `.` walks it now, `..` walks it carefully",
+        "### The breadcrumb trail",
+        "### Where am I",
+    ):
+        assert topic in readme, f"README lost the walking guide: {topic}"
+    for behaviour in ("path blocked", "arrived", "no location info"):
+        assert behaviour in readme, f"README stopped explaining: {behaviour}"
+
+
 def test_every_lua_example_in_the_scripting_guide_is_valid(tmp_path):
     guide = SCRIPTING_GUIDE.read_text(encoding="utf-8")
     examples = re.findall(r"```lua\n(.*?)```", guide, re.DOTALL)
