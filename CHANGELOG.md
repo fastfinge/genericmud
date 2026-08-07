@@ -7,6 +7,69 @@ fails the build on purpose.
 
 Entries start at 0.7.1. Earlier releases were tagged before this file existed.
 
+## 0.10.0 — 2026-08-07
+
+**genericMud maps as you explore**
+
+* On MUDs that tell the client which room you are in, genericMud now builds a
+  map while you play. Alt+M reads out the room and where each exit leads,
+  including which exits you have not been through yet.
+* Type /goto and a room name to walk there by the shortest way the map knows.
+  Type /label and a name to name the room you are in so you can come back to
+  it, and /map to hear how much of the world you have mapped. Maps are saved
+  for each world.
+* Walking to a mapped room goes one room at a time and stops if something moves
+  you off the route, such as a teleport or a trapdoor, instead of carrying on
+  from the wrong place.
+* Only rooms the MUD identifies itself go on the map. A MUD that does not share
+  your location says so, rather than building a map that would walk you into a
+  wall.
+
+**MUDs that used to sit silent now work**
+
+Four handshakes were missing, and each one made a MUD look broken.
+
+* Soundpack cues over MSP. Servers that wait to be asked, which includes many
+  SMAUG-based MUDs, were sending no sounds at all. Reported in #1.
+* Music and sound now stop when the MUD says to stop. An off cue used to be
+  treated as a file named Off, so entering one area with music meant it played
+  over everything else for the rest of the session. Looping ambience such as
+  rain and wind loops properly, and music volume is honoured.
+* Room and character data over GMCP. Nothing arrived until the client
+  subscribed, so "where am I" had nothing to say and careful walking could not
+  tell when you had arrived.
+* Room and character data over MSDP. Same problem, so every piece of live MUD
+  data in a command field came back empty with nothing to explain why.
+
+**genericMud now tells the MUD it is a screen reader**
+
+* It answers the terminal-type question properly, including the screen reader
+  flag. MUDs that check it stop sending ASCII art, maps and progress bars.
+
+**It stops talking over your screen reader**
+
+* Download progress no longer speaks percentages. NVDA already follows the
+  progress bar itself, so those announcements talked over your own beeps, and
+  over a deliberate choice to turn progress output off. The stage it has reached
+  is still spoken, because a progress bar cannot say that part.
+
+**Disconnects explain themselves**
+
+* When a MUD closes the connection and says why, whether that is kicked,
+  banned, shutting down, or logged in elsewhere, you now hear the reason
+  instead of a plain lost connection, and genericMud no longer reconnects
+  straight back into a kick.
+* Fixed every command being written to the session log as three asterisks after
+  a reconnect.
+
+**The manual covers the whole client**
+
+* The README now explains everything genericMud can do, and opens with the four
+  keys you need to start playing.
+* Walking is documented properly for the first time: how to write a route like
+  .3n2e, what ..3n2e does differently, and what the breadcrumb trail can and
+  cannot take you back through.
+
 ## 0.9.1 — 2026-08-01
 
 **Automation now has one place to work**
