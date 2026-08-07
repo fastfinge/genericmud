@@ -32,19 +32,27 @@ _LONG_DIRECTIONS = {
 }
 # Compass order for spoken exit lists; alphabetical would read "down, east, north".
 _SPOKEN_ORDER = ("n", "ne", "e", "se", "s", "sw", "w", "nw", "u", "d")
-# The graph is the one structure here that grows with play, and room reports arrive from
-# the server, so it stops accepting new rooms far above any real MUD (Aardwolf, the
-# largest commonly mapped, is around fifty thousand).
+# Everything the graph holds comes from the server, so every dimension it can grow along
+# needs a ceiling — otherwise a broken or hostile MUD can exhaust memory (and the saved
+# map, and the work spent describing a room aloud) without ever disconnecting. The limits
+# sit far above any real MUD: Aardwolf, the largest commonly mapped, is ~50k rooms, and a
+# room with more than a dozen exits is already unusual.
 MAX_ROOMS = 100_000
+MAX_EXITS_PER_ROOM = 64
+_MAX_ID = 64
+_MAX_DIRECTION = 32  # "enter portal" is a legitimate exit name; a kilobyte of one is not
+_MAX_TEXT = 200  # room and area names, which are only ever spoken or matched against
 _SCHEMA_VERSION = 1
 
 
 def _normalize_direction(name: Any) -> str:
     text = str(name).strip().lower()
+    if len(text) > _MAX_DIRECTION:
+        return ""  # not a direction anything could sensibly send
     return _LONG_DIRECTIONS.get(text, text)
 
 
-def _count(number: int, singular: str) -> str:
+def spoken_count(number: int, singular: str) -> str:
     """"1 room" / "4 rooms" — spoken counts, so the plural has to agree."""
     return f"{number} {singular}" if number == 1 else f"{number} {singular}s"
 
@@ -62,7 +70,7 @@ def _room_id(value: Any) -> str | None:
     if isinstance(value, (int, float)):
         return str(int(value)) if value > 0 else None
     text = str(value).strip()
-    if not text:
+    if not text or len(text) > _MAX_ID:
         return None
     if text.lstrip("+-").isdigit():
         return text if int(text) > 0 else None
@@ -85,8 +93,11 @@ def _normalize_exits(value: Any) -> dict[str, str | None]:
         return exits
     for direction, destination in items:
         name = _normalize_direction(direction)
-        if name:
-            exits[name] = _room_id(destination)
+        if not name:
+            continue
+        if name not in exits and len(exits) >= MAX_EXITS_PER_ROOM:
+            continue  # a server inventing exit names can't grow this without limit
+        exits[name] = _room_id(destination)
     return exits
 
 
@@ -119,8 +130,8 @@ def normalize_room(data: dict) -> Room | None:
         return None
     return Room(
         id=room_id,
-        name=str(lowered.get("name") or "").strip(),
-        area=str(lowered.get("area") or lowered.get("zone") or "").strip(),
+        name=str(lowered.get("name") or "").strip()[:_MAX_TEXT],
+        area=str(lowered.get("area") or lowered.get("zone") or "").strip()[:_MAX_TEXT],
         exits=_normalize_exits(lowered.get("exits") or lowered.get("idexits")),
     )
 
@@ -153,7 +164,11 @@ class RoomMap:
         known = self.rooms.get(room.id)
         if known is None:
             if len(self.rooms) >= MAX_ROOMS:
+                # Off the map for the same reason as an unmappable report: the player is
+                # somewhere the graph has no node for, so any route from "here" would
+                # start from the room they already left.
                 self.full = True
+                self.here = ""
                 return None
             room.visited = True
             self.rooms[room.id] = room
@@ -164,9 +179,12 @@ class RoomMap:
             if room.area:
                 known.area = room.area
             for direction, destination in room.exits.items():
+                new_direction = direction not in known.exits
+                if new_direction and len(known.exits) >= MAX_EXITS_PER_ROOM:
+                    continue  # else successive reports accumulate invented exits forever
                 # Merge rather than replace, and never let a later report that omits a
                 # destination (a maze listing, a closed door) erase one already learned.
-                if destination is not None or direction not in known.exits:
+                if destination is not None or new_direction:
                     known.exits[direction] = destination
         self.here = room.id
         return room.id
@@ -176,13 +194,16 @@ class RoomMap:
         room = self.rooms.get(room_id or self.here)
         if room is None:
             return False
-        room.label = text.strip()
+        room.label = text.strip()[:_MAX_TEXT]
         return True
 
     # --- asking ---
 
-    def path_to(self, goal: str, start: str = "") -> list[str] | None:
-        """Directions from ``start`` (default: the current room) to ``goal``.
+    def route_to(self, goal: str, start: str = "") -> tuple[list[str], list[str]] | None:
+        """``(directions, rooms)`` from ``start`` (default: here) to ``goal``, or None.
+
+        ``rooms[i]`` is the room step ``i`` should land in, which is what lets a walk tell
+        that it has been moved off its route rather than along it.
 
         Breadth-first, so the route is the fewest moves the map knows of. A room known
         only as somewhere an exit leads is a valid destination but can't be routed
@@ -192,23 +213,28 @@ class RoomMap:
         if not start or not goal:
             return None
         if start == goal:
-            return []
-        queue: deque[tuple[str, list[str]]] = deque([(start, [])])
+            return ([], [])
+        queue: deque[tuple[str, list[str], list[str]]] = deque([(start, [], [])])
         seen = {start}
         while queue:
-            current, route = queue.popleft()
+            current, steps, rooms = queue.popleft()
             room = self.rooms.get(current)
             if room is None:
                 continue
             for direction, destination in room.exits.items():
                 if destination is None or destination in seen:
                     continue
-                step = [*route, direction]
+                next_steps, next_rooms = [*steps, direction], [*rooms, destination]
                 if destination == goal:
-                    return step
+                    return (next_steps, next_rooms)
                 seen.add(destination)
-                queue.append((destination, step))
+                queue.append((destination, next_steps, next_rooms))
         return None
+
+    def path_to(self, goal: str, start: str = "") -> list[str] | None:
+        """Only the directions of :meth:`route_to`."""
+        route = self.route_to(goal, start)
+        return None if route is None else route[0]
 
     def search(self, query: str) -> list[Room]:
         """Visited rooms whose label or name matches ``query``, closest match first.
@@ -276,10 +302,10 @@ class RoomMap:
             return "nothing mapped yet"
         openings = sum(len(self.unexplored(room.id)) for room in visited)
         areas = len({room.area for room in visited if room.area})
-        parts = [f"{_count(len(visited), 'room')} mapped"]
+        parts = [f"{spoken_count(len(visited), 'room')} mapped"]
         if areas:
-            parts.append("in 1 area" if areas == 1 else f"across {_count(areas, 'area')}")
-        parts.append(_count(openings, "unexplored exit"))
+            parts.append("in 1 area" if areas == 1 else f"across {spoken_count(areas, 'area')}")
+        parts.append(spoken_count(openings, "unexplored exit"))
         if self.full:
             parts.append("map is full and no longer growing")
         return ", ".join(parts)

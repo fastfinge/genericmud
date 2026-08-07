@@ -145,6 +145,8 @@ class SafeWalk:
         announce: Callable[[str], None],
         step_timeout: float = 0.5,
         blocked_patterns: tuple[str, ...] = DEFAULT_BLOCKED_PATTERNS,
+        waypoints: list[str] | None = None,
+        locate: Callable[[], str] | None = None,
     ) -> None:
         self._remaining = list(steps)
         self._send = send
@@ -154,16 +156,41 @@ class SafeWalk:
         self._blocked = [re.compile(pattern, re.IGNORECASE) for pattern in blocked_patterns]
         self._token = 0  # bumps each step so a stale timeout callback no-ops
         self._active = False
+        # A mapped route knows which room each step should land in, so it can tell being
+        # moved off the route from moving along it. A typed speedwalk has no waypoints and
+        # keeps the old behaviour of trusting any room change.
+        self._waypoints = list(waypoints) if waypoints else []
+        self._locate = locate
+        self._sent = 0
 
     def start(self) -> None:
         self._active = True
         self._advance()
 
     def on_room_change(self) -> None:
-        """A confirmed move (GMCP room changed): send the next step now."""
-        if self._active:
-            self._token += 1  # invalidate the in-flight timeout
-            self._advance()
+        """A confirmed move (the MUD reported a new room): send the next step now."""
+        if not self._active:
+            return
+        if self._strayed():
+            abandoned = len(self._remaining)
+            self.cancel()
+            self._announce(f"off the route, {abandoned} steps abandoned")
+            return
+        self._token += 1  # invalidate the in-flight timeout
+        self._advance()
+
+    def _strayed(self) -> bool:
+        """True when the room reached isn't the one this step of the route was heading for.
+
+        Only a mapped route can tell: a teleport, a trapdoor or being dragged would
+        otherwise send the rest of the directions from a room the route never ran through.
+        A room the map can't place counts as strayed — not knowing where the player is is
+        not a reason to keep walking them.
+        """
+        if not self._waypoints or self._locate is None or not self._sent:
+            return False
+        index = min(self._sent, len(self._waypoints)) - 1
+        return self._locate() != self._waypoints[index]
 
     def on_line(self, text: str) -> None:
         """Halt the walk if an incoming line says the move was blocked."""
@@ -187,6 +214,7 @@ class SafeWalk:
             return
         step = self._remaining.pop(0)
         self._send(step)
+        self._sent += 1
         self._token += 1
         token = self._token
         self._schedule(self._timeout, lambda: self._on_timeout(token))

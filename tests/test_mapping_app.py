@@ -201,6 +201,70 @@ def test_room_wrongdir_halts_a_walk():
     assert app.map.rooms["1"].exits["n"] == "2"
 
 
+def test_re_reporting_the_same_room_does_not_advance_a_walk():
+    app, backend, sent, _scheduled = _app()
+    _room(app, 1, "Start", {"n": 2})
+    _room(app, 2, "Middle", {"n": 3, "s": 1})
+    _room(app, 3, "End", {"s": 2})
+    _room(app, 2, "Middle", {"n": 3, "s": 1})
+    _room(app, 1, "Start", {"n": 2})
+    sent.clear()
+    app.on_ws_message({"type": "input", "text": "/goto end"})
+    assert sent == ["n"]
+    # The same room reported again with a changed exit list or name is NOT movement.
+    # Treating it as movement would send step two before the player had taken step one.
+    _room(app, 1, "Start", {"n": 2, "e": 9})
+    _room(app, 1, "Start Room", {"n": 2, "e": 9})
+    assert sent == ["n"]
+    assert app._walk is not None and app._walk.active
+    # A genuine move still advances it.
+    _room(app, 2, "Middle", {"n": 3, "s": 1})
+    assert sent == ["n", "n"]
+
+
+def test_being_moved_off_a_goto_route_halts_the_walk():
+    app, backend, sent, _scheduled = _app()
+    _room(app, 1, "Start", {"n": 2})
+    _room(app, 2, "Middle", {"n": 3, "s": 1})
+    _room(app, 3, "End", {"s": 2})
+    _room(app, 50, "Far Away Dungeon", {"n": 51})
+    _room(app, 1, "Start", {"n": 2})
+    sent.clear()
+    backend.spoken.clear()
+    app.on_ws_message({"type": "input", "text": "/goto end"})
+    assert sent == ["n"]
+    # A trapdoor, a teleport, being dragged: the player is somewhere the route never ran
+    # through, so the remaining directions must not be fired from there.
+    _room(app, 50, "Far Away Dungeon", {"n": 51})
+    assert sent == ["n"]
+    assert app._walk is not None and not app._walk.active
+    assert "off the route, 1 steps abandoned" in _spoken(backend)
+
+
+def test_being_teleported_somewhere_unmappable_also_halts_the_walk():
+    app, backend, sent, _scheduled = _app()
+    _room(app, 1, "Start", {"n": 2})
+    _room(app, 2, "Middle", {"n": 3, "s": 1})
+    _room(app, 3, "End", {"s": 2})
+    _room(app, 1, "Start", {"n": 2})
+    sent.clear()
+    app.on_ws_message({"type": "input", "text": "/goto end"})
+    _room(app, -1, "Clan Hall", {})  # off the map entirely
+    assert sent == ["n"]
+    assert app._walk is not None and not app._walk.active
+    assert "off the route" in _spoken(backend)
+
+
+def test_a_plain_speedwalk_still_trusts_any_room_change():
+    app, _backend, sent, _scheduled = _app()
+    # A typed "..3n" has no route behind it, so there are no waypoints to check against
+    # and the old behaviour (advance on any confirmed move) has to be preserved.
+    app.on_ws_message({"type": "input", "text": "..2n"})
+    assert sent == ["n"]
+    _room(app, 77, "Somewhere Unexpected", {"s": 1})
+    assert sent == ["n", "n"]
+
+
 def test_unmapped_muds_stay_silent_and_write_nothing(tmp_path):
     app, backend, _sent, _scheduled = _app(tmp_path, name="godwars")
     app.on_telnet_event(Subnegotiation(OPT_GMCP, b'char.vitals {"hp": 50}'))

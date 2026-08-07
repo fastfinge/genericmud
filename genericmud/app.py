@@ -23,7 +23,7 @@ from genericmud.bridge import protocol
 from genericmud.completion import OutputWordIndex
 from genericmud.config.atomic import atomic_write_text
 from genericmud.config.worlds import config_dir
-from genericmud.mapping import RoomMap, load_map, save_map
+from genericmud.mapping import RoomMap, load_map, save_map, spoken_count
 from genericmud.model.buffer import Buffer, Line
 from genericmud.navigation import Navigator, SafeWalk, expand_speedwalk
 from genericmud.packs import ActivationResult, PackStore, activate_world, user_rules
@@ -866,15 +866,21 @@ class EngineApp:
     def _update_room(self, room: dict) -> None:
         changed = room != self.nav.room
         self.nav.update_room(room)
+        was = self.map.here
         known = len(self.map.rooms)
-        self.map.observe(room)
+        room_id = self.map.observe(room)
         if len(self.map.rooms) > known:
             self._map_unsaved += 1
             if self._map_unsaved >= _MAP_SAVE_INTERVAL:
                 self._save_map()  # a crash mustn't cost a whole session's exploring
-        if changed:
+        # A MUD that identifies its rooms gives an exact movement signal. Comparing whole
+        # reports instead counts a re-send of the SAME room (an exit list that grew, a
+        # detail that changed) as a move, which advances a walk the player hasn't taken a
+        # step of. Only reports carrying no id fall back to comparing the payload.
+        moved = room_id != was if room_id else changed
+        if moved:
             self._on_player_moved()  # follow mode: the new room barges over the old one
-        if changed and self._walk is not None and self._walk.active:
+        if moved and self._walk is not None and self._walk.active:
             self._walk.on_room_change()  # confirmed move -> advance the safe-walk
 
     def _on_player_moved(self) -> None:
@@ -989,8 +995,14 @@ class EngineApp:
         self._start_safe_walk(steps)
         return True
 
-    def _start_safe_walk(self, steps: list[str], announcement: str = "") -> None:
-        """Begin a step-at-a-time walk, superseding any walk already running."""
+    def _start_safe_walk(
+        self, steps: list[str], announcement: str = "", waypoints: list[str] | None = None
+    ) -> None:
+        """Begin a step-at-a-time walk, superseding any walk already running.
+
+        ``waypoints`` (a mapped route only) is the room each step should land in, so the
+        walk halts if something moves the player off it.
+        """
         self._cancel_walk()  # don't leave both walks' timers firing into each other
 
         def send_and_record(direction: str) -> None:
@@ -999,7 +1011,12 @@ class EngineApp:
                 self._on_player_moved()
 
         self._walk = SafeWalk(
-            steps, send=send_and_record, schedule=self._schedule, announce=self._speak_system
+            steps,
+            send=send_and_record,
+            schedule=self._schedule,
+            announce=self._speak_system,
+            waypoints=waypoints,
+            locate=lambda: self.map.here,
         )
         if announcement:
             self._speak_system(announcement)
@@ -1071,16 +1088,19 @@ class EngineApp:
             self._speak_system(f"no mapped room matches {query}")
             return
         for room in matches:
-            path = self.map.path_to(room.id)
-            if path is None:
+            route = self.map.route_to(room.id)
+            if route is None:
                 continue
+            path, waypoints = route
             target = room.label or room.name
             if not path:
                 self._speak_system(f"you are already at {target}")
                 return
             # Through SafeWalk, not a burst: it halts on a blocked exit, and a route
             # assembled from remembered rooms is exactly where a stale edge shows up.
-            self._start_safe_walk(path, f"walking to {target}, {len(path)} steps")
+            self._start_safe_walk(
+                path, f"walking to {target}, {spoken_count(len(path), 'step')}", waypoints=waypoints
+            )
             return
         # Every match is somewhere the map knows of but can't currently reach.
         found = matches[0].label or matches[0].name

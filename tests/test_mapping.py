@@ -7,6 +7,7 @@ documentation give verbatim, so the shapes under test are the shapes real server
 from __future__ import annotations
 
 from genericmud.mapping import (
+    MAX_EXITS_PER_ROOM,
     MAX_ROOMS,
     RoomMap,
     load_map,
@@ -207,6 +208,52 @@ def test_the_graph_stops_growing_at_the_cap(monkeypatch):
     # A room already known still updates once the cap is reached.
     assert room_map.observe({"num": 1, "name": "One", "exits": {"n": 2}}) == "1"
     assert MAX_ROOMS > 2  # the shipped cap is not the test's
+
+
+def test_reaching_the_cap_leaves_the_player_off_the_map(monkeypatch):
+    import genericmud.mapping as mapping
+
+    monkeypatch.setattr(mapping, "MAX_ROOMS", 1)
+    room_map = RoomMap()
+    room_map.observe({"num": 1, "name": "One", "exits": {"n": 2}})
+    assert room_map.here == "1"
+    # The player walked into a room the graph can't hold. Leaving "here" on the room
+    # behind them would route the next walk from a room they've already left.
+    assert room_map.observe({"num": 2, "name": "Two", "exits": {"s": 1}}) is None
+    assert room_map.here == ""
+    assert room_map.path_to("1") is None
+
+
+def test_a_server_cannot_grow_one_rooms_exits_without_limit():
+    room_map = RoomMap()
+    # Exit names are server-controlled, and reports merge rather than replace, so without
+    # a cap a MUD could stream unique exit names at one room forever.
+    for batch in range(200):
+        room_map.observe({"num": 1, "name": "One", "exits": {f"x{batch}": 2}})
+    assert len(room_map.rooms["1"].exits) == MAX_EXITS_PER_ROOM
+    # A single oversized report is capped the same way.
+    room_map.observe({"num": 2, "name": "Two", "exits": {f"y{n}": 3 for n in range(500)}})
+    assert len(room_map.rooms["2"].exits) == MAX_EXITS_PER_ROOM
+
+
+def test_absurd_identifiers_and_text_are_refused_or_trimmed():
+    assert normalize_room({"num": "9" * 200, "name": "Huge id"}) is None
+    room = normalize_room(
+        {"num": 1, "name": "N" * 5000, "zone": "Z" * 5000, "exits": {"d" * 500: 2, "n": 3}}
+    )
+    assert room is not None
+    assert len(room.name) == 200 and len(room.area) == 200
+    assert room.exits == {"n": "3"}  # the kilobyte-long direction is dropped, not kept
+
+
+def test_route_reports_the_rooms_each_step_lands_in():
+    room_map = RoomMap()
+    room_map.observe({"num": 1, "name": "One", "exits": {"n": 2}})
+    room_map.observe({"num": 2, "name": "Two", "exits": {"n": 3, "s": 1}})
+    room_map.observe({"num": 3, "name": "Three", "exits": {"s": 2}})
+    assert room_map.route_to("3", start="1") == (["n", "n"], ["2", "3"])
+    assert room_map.route_to("1", start="1") == ([], [])
+    assert room_map.route_to("404", start="1") is None
 
 
 def test_map_survives_a_save_and_load(tmp_path):
