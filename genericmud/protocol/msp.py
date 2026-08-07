@@ -1,7 +1,11 @@
 """MSP (Mud Sound Protocol) parsing.
 
-MSP is inline, not a telnet option: servers embed ``!!SOUND(file ...)`` and
-``!!MUSIC(file ...)`` tags in the text stream. Parameters are ``K=V`` tokens:
+The cues are inline: servers embed ``!!SOUND(file ...)`` and ``!!MUSIC(file ...)``
+tags in the text stream, so this module is a line parser rather than a
+subnegotiation decoder. MSP is still telnet option 90 — spec-compliant servers
+send ``IAC WILL MSP`` and emit nothing until the client answers ``IAC DO MSP``,
+so the option has to be in ``_ACCEPT_REMOTE`` for any of this to run at all.
+Parameters are ``K=V`` tokens:
 V=volume(0-100), L=loops(-1 infinite, default 1), P=priority, T=type/group,
 U=download URL. We strip the tags from the visible line and return the cues.
 """

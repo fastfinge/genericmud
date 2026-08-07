@@ -31,10 +31,12 @@ _TTYPE_SEND = 1  # IAC SB TTYPE SEND ... — server requests our terminal type
 _TTYPE_IS = 0  # IAC SB TTYPE IS <name> IAC SE — our reply
 
 # Remote (server-side WILL) options we accept by replying DO.
+# MSP carries no subnegotiation of its own — the cues are inline !!SOUND/!!MUSIC tags —
+# but spec-compliant servers still gate those tags behind DO MSP, so it has to be here.
 # MXP is intentionally omitted: we don't parse it yet, so advertising DO MXP just
 # makes servers emit MXP markup that leaks into the output. Re-add when parsed.
 _ACCEPT_REMOTE = frozenset(
-    {T.OPT_MCCP2, T.OPT_GMCP, T.OPT_MSDP, T.OPT_MSSP, T.OPT_EOR, T.OPT_SGA}
+    {T.OPT_MCCP2, T.OPT_GMCP, T.OPT_MSDP, T.OPT_MSSP, T.OPT_MSP, T.OPT_EOR, T.OPT_SGA}
 )
 # Local (our-side) options we offer by replying WILL when the server says DO.
 _ENABLE_LOCAL = frozenset({T.OPT_TTYPE, T.OPT_NAWS})

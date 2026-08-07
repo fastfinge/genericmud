@@ -45,6 +45,7 @@ OPT_MSDP = 69  # Mud Server Data Protocol
 OPT_MSSP = 70  # Mud Server Status Protocol
 OPT_MCCP2 = 86  # Mud Client Compression Protocol v2
 OPT_MCCP3 = 87  # Mud Client Compression Protocol v3
+OPT_MSP = 90  # Mud Sound Protocol
 OPT_MXP = 91  # Mud eXtension Protocol
 OPT_GMCP = 201  # Generic Mud Communication Protocol
 
