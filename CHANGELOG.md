@@ -7,7 +7,7 @@ fails the build on purpose.
 
 Entries start at 0.7.1. Earlier releases were tagged before this file existed.
 
-## Unreleased
+## 0.11.0 — 2026-08-13
 
 **Self-voice speaks through your screen reader on Mac and Linux too**
 
@@ -20,6 +20,19 @@ Entries start at 0.7.1. Earlier releases were tagged before this file existed.
   the built-in Mac speech, or speech-dispatcher on Linux, same as before.
 * Lines reach a braille display wherever your screen reader supports it, which
   now includes Mac and Linux; those two used to be speech only.
+
+**Speech that used to stop and stay stopped**
+
+* Restarting your screen reader no longer silences the client. Speech went quiet
+  for the rest of the session, without saying why, and only came back if you
+  restarted genericMud. It now picks your reader up again on the next line, and a
+  reader you start after genericMud is found as well.
+* MUDs that restart in place no longer forget you are using a screen reader. On a
+  server that strips decoration for screen reader users, that setting was lost at
+  the restart and the output filled with symbols again until you reconnected.
+* Review keys still speak when self-voice is off with Ctrl+M. Alt+Up and Alt+Down,
+  Ctrl+1 to 9, and the last tell and chat keys produced nothing at all in that
+  mode, which is the mode you are most likely to be reading in.
 
 ## 0.10.0 — 2026-08-07
 
